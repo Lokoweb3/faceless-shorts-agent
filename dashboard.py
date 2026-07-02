@@ -128,6 +128,13 @@ async def api_analytics(request):
     return web.json_response(data)
 
 
+async def api_variants(request):
+    """Per-variant performance (built by the daily stats refresh) — which
+    hook styles / endings / closings actually get watched."""
+    data = _read_json(STATE_DIR / "variant_stats.json", {})
+    return web.json_response(data)
+
+
 async def api_logs(request):
     n = int(request.query.get("n", 120))
     log_file = LOG_DIR / f"agent_{datetime.now().strftime('%Y%m%d')}.log"
@@ -241,6 +248,7 @@ def build_app(auth_token: str) -> web.Application:
         web.get("/api/queue", api_queue),
         web.get("/api/history", api_history),
         web.get("/api/analytics", api_analytics),
+        web.get("/api/variants", api_variants),
         web.get("/api/logs", api_logs),
         web.post("/api/run", api_run),
         web.post("/api/discover", api_discover),

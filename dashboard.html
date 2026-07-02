@@ -162,6 +162,11 @@
     </div>
   </div>
 
+  <div class="panel" id="variants-panel" style="display:none;margin-bottom:18px">
+    <h2>Performance by variant <span class="count" id="v-updated"></span></h2>
+    <div class="body" id="variants"></div>
+  </div>
+
   <div class="feed">
     <h2>Comms feed</h2>
     <pre id="log">Waiting for activity…</pre>
@@ -217,6 +222,7 @@ async function refresh(){
 
     renderQueue(await getJSON("/api/queue"));
     renderHistory(await getJSON("/api/history"));
+    try{ renderVariants(await getJSON("/api/variants")); }catch(e){ /* optional panel */ }
     const logs = await getJSON("/api/logs");
     const pre = $("log"); const atBottom = pre.scrollTop+pre.clientHeight >= pre.scrollHeight-20;
     pre.textContent = logs.lines.length ? logs.lines.join("\n") : "Waiting for activity…";
@@ -254,6 +260,45 @@ function renderHistory(items){
 }
 
 function esc(s){ return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+// Shorten prompt-length variant descriptions to their essence for display.
+function variantLabel(v){
+  let s = String(v).replace(/^"|"$/g,"");
+  const paren = s.indexOf(" (e.g.");
+  if(paren > 0) s = s.slice(0, paren);
+  return s.length > 70 ? s.slice(0, 67) + "…" : s;
+}
+const KIND_NAMES = {hook_style:"Hook style", ending_style:"Ending style", closing:"Closing line"};
+
+function renderVariants(data){
+  const panel = $("variants-panel"), el = $("variants");
+  const kinds = (data && data.variants) ? Object.entries(data.variants) : [];
+  // Only show once at least one variant has measured videos.
+  const hasData = kinds.some(([,vals]) => Object.values(vals).some(s => (s.videos||0) > 0));
+  if(!hasData){ panel.style.display = "none"; return; }
+  panel.style.display = "";
+  $("v-updated").textContent = data.generated_at ? fmtTime(data.generated_at) : "";
+  el.innerHTML = kinds.map(([kind, vals])=>{
+    const rows = Object.entries(vals)
+      .filter(([,s]) => (s.videos||0) > 0)
+      .sort((a,b)=> (b[1].avg_views||0) - (a[1].avg_views||0));
+    if(!rows.length) return "";
+    const max = Math.max(...rows.map(([,s])=> s.avg_views||0), 1);
+    return `<div class="title" style="margin:10px 0 4px">${esc(KIND_NAMES[kind]||kind)}</div>` +
+      rows.map(([v,s])=>`
+        <div class="row">
+          <div style="flex:1;min-width:0">
+            <div class="meta" title="${esc(v)}">${esc(variantLabel(v))}</div>
+            <div style="height:6px;border-radius:3px;background:rgba(127,127,127,.15);margin-top:3px">
+              <div style="height:6px;border-radius:3px;width:${Math.max(3,Math.round((s.avg_views||0)/max*100))}%;background:var(--accent,#7c5cff)"></div>
+            </div>
+          </div>
+          <div class="right" style="white-space:nowrap;padding-left:12px">
+            <span class="score">${Math.round(s.avg_views||0)} avg views · ${s.videos} video${s.videos!==1?"s":""}</span>
+          </div>
+        </div>`).join("");
+  }).join("");
+}
 
 async function trigger(url, body, label){
   if(busy) return;

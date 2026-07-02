@@ -256,6 +256,7 @@ class ContentPipeline:
         yt_description = self._build_description(item, script_data)
         yt_tags = self._build_tags(item, script_data)
         privacy = _get_env("UPLOAD_PRIVACY", "private")
+        variants = script_data.get("variants") or {}
         video_id = await self.publisher.publish(
             video_path=video_path,
             thumbnail_path=thumbnail_path,
@@ -264,6 +265,7 @@ class ContentPipeline:
             tags=yt_tags,
             category=item.category,
             privacy_status=privacy,
+            variants=variants,
         )
         if not video_id:
             # The video is fully assembled on disk — never throw that work
@@ -280,6 +282,7 @@ class ContentPipeline:
                 "tags": yt_tags,
                 "category": item.category,
                 "privacy_status": privacy,
+                "variants": variants,
                 "item": item_dict,
             })
             self.state.mark_pending_upload(item_dict)
@@ -328,6 +331,7 @@ class ContentPipeline:
                 tags=entry.get("tags", []),
                 category=entry.get("category", ""),
                 privacy_status=entry.get("privacy_status", "private"),
+                variants=entry.get("variants") or {},
             )
             if video_id:
                 item = entry.get("item") or {}
@@ -469,9 +473,31 @@ class Scheduler:
         self.running = False
         self._shutdown_event.set()
 
+    STATS_STAMP_FILE = STATE_DIR / "stats_refreshed.json"
+
+    async def _maybe_refresh_stats(self):
+        """Once per UTC day, pull real view counts and rebuild the variant
+        performance table that biases script rotation (analytics feedback
+        loop). Costs ~1 quota unit — negligible next to a 1600-unit upload."""
+        today = datetime.now(timezone.utc).date().isoformat()
+        from storage import load_json, atomic_write_json
+        stamp = load_json(self.STATS_STAMP_FILE, {})
+        if stamp.get("date") == today:
+            return
+        try:
+            updated = await self.pipeline.publisher.refresh_stats()
+            atomic_write_json(self.STATS_STAMP_FILE,
+                              {"date": today, "videos_updated": updated})
+        except Exception as e:
+            logger.warning(f"Daily stats refresh failed (will retry next cycle): {e}")
+
     async def _run_cycle(self):
         """Run a single scheduler cycle."""
         logger.info("=== Starting scheduler cycle ===")
+
+        # Analytics feedback loop: refresh view counts once a day.
+        if not config.scheduler.dry_run:
+            await self._maybe_refresh_stats()
 
         # 0. Circuit breaker: if uploads are quota-paused, don't burn AI /
         #    image / TTS work generating videos that can't be published yet.
@@ -698,6 +724,10 @@ async def main():
         "--discover", action="store_true",
         help="Run discovery only and show results"
     )
+    parser.add_argument(
+        "--refresh-stats", action="store_true",
+        help="Pull fresh YouTube view counts, rebuild variant performance, and exit"
+    )
 
     args = parser.parse_args()
 
@@ -739,6 +769,13 @@ async def main():
     if args.history:
         history = await agent.history()
         print(json.dumps(history, indent=2))
+        return
+
+    if args.refresh_stats:
+        updated = await agent.pipeline.publisher.refresh_stats()
+        table = agent.pipeline.publisher.analytics.rebuild_variant_stats()
+        print(f"Updated {updated} video(s). Variant performance:")
+        print(json.dumps(table.get("variants", {}), indent=2))
         return
 
     if args.discover:

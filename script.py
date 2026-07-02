@@ -15,7 +15,7 @@ from pathlib import Path
 
 import aiohttp
 
-from config import config, DATA_DIR, SCRIPTS_OUTPUT_DIR, _get_env, CONTENT_MODE
+from config import config, DATA_DIR, STATE_DIR, SCRIPTS_OUTPUT_DIR, _get_env, CONTENT_MODE
 from storage import atomic_write_json, load_json
 
 # ── Variety engine: injected per-story so the AI can't settle into one rut ──
@@ -39,6 +39,62 @@ _ENDING_STYLES = [
     "the horror only implied — cut away the instant before it lands",
     "a small human detail that becomes unbearable in hindsight",
 ]
+
+# Bible-mode rotations (hoisted from the prompt builder so the analytics
+# feedback loop can weight them by real performance).
+_BIBLE_HOOK_STYLES = [
+    'a direct question (e.g. "Have you ever wondered if anyone really sees your struggle?")',
+    'a quiet observation (e.g. "There is a kind of tired that sleep cannot fix.")',
+    'a gentle second-person statement (e.g. "You have carried this longer than anyone knows.")',
+    'a small relatable scene (e.g. "It is late, the house is quiet, and your mind will not rest.")',
+    'a reassuring promise (e.g. "Before this day even began, you were already loved.")',
+    'a "when you..." line, used SPARINGLY (e.g. "When the weight feels like too much, hear this.")',
+]
+_BIBLE_CLOSINGS = [
+    '"Let this settle into your heart today."',
+    '"Hold onto this as you go."',
+    '"Breathe, and let Him carry the rest."',
+    '"Rest in that truth tonight."',
+    '"Take this with you into whatever comes next."',
+    '"Let it quiet your heart."',
+    '"You can rest in that."',
+    '"Walk gently today, knowing this."',
+]
+
+# ── Analytics feedback loop: performance-weighted variant selection ──────────
+# The nightly stats job (publisher.refresh_video_stats) aggregates real view
+# counts per variant into state/variant_stats.json. Rotation points below use
+# weighted_variant() instead of random.choice(): 20% of the time it still
+# explores uniformly (so no variant ever starves), otherwise it samples
+# proportionally to average views, with unproven variants (<2 measured
+# videos) weighted at the global average so new options get a fair shot.
+
+VARIANT_STATS_FILE = STATE_DIR / "variant_stats.json"
+_EXPLORE_RATE = 0.2
+_MIN_VIDEOS_TO_TRUST = 2
+
+
+def weighted_variant(kind: str, options: list) -> str:
+    """Pick a rotation variant, biased toward what has actually performed."""
+    try:
+        stats = load_json(VARIANT_STATS_FILE, {}).get("variants", {}).get(kind, {})
+    except Exception:
+        stats = {}
+    if not stats or random.random() < _EXPLORE_RATE:
+        return random.choice(options)
+    proven = [v["avg_views"] for v in stats.values()
+              if v.get("videos", 0) >= _MIN_VIDEOS_TO_TRUST]
+    if not proven:
+        return random.choice(options)
+    prior = max(sum(proven) / len(proven), 1.0)   # fair weight for the unproven
+    weights = []
+    for opt in options:
+        s = stats.get(opt)
+        if s and s.get("videos", 0) >= _MIN_VIDEOS_TO_TRUST:
+            weights.append(max(float(s.get("avg_views", 0.0)), prior * 0.05))
+        else:
+            weights.append(prior)
+    return random.choices(options, weights=weights, k=1)[0]
 
 
 logger = logging.getLogger(__name__)
@@ -173,6 +229,10 @@ class ScriptGenerator:
     def __init__(self):
         self.output_dir = SCRIPTS_OUTPUT_DIR
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        # Which rotation variants (hook style, ending style, ...) the most
+        # recent _build_prompt chose — recorded into script_data so the
+        # analytics loop can join performance back onto them.
+        self._last_variants: Dict[str, str] = {}
 
     async def generate(self, content_item: Any, category: str,
                        language: str = "en") -> Optional[Dict[str, Any]]:
@@ -185,8 +245,10 @@ class ScriptGenerator:
             SCRIPT_TEMPLATES["legendary"]
         )
 
-        # Build prompt
+        # Build prompt (sets self._last_variants to the rotation choices made)
+        self._last_variants = {}
         prompt = self._build_prompt(content_item, template, language)
+        variants = dict(self._last_variants)
 
         # Generate via AI
         ai_text = await self._call_ai(prompt)
@@ -227,6 +289,9 @@ class ScriptGenerator:
             "language": language,
             "title": content_item.title if hasattr(content_item, 'title') else "Untitled Story",
             "estimated_duration_seconds": self._estimate_duration(full_text),
+            # Which rotation variants produced this script — the analytics
+            # loop joins views back onto these to learn what performs.
+            "variants": variants,
         }
 
         # Story-matched visual scene prompts (only needed for AI-image visuals)
@@ -586,28 +651,12 @@ class ScriptGenerator:
             # NOTE: no local `import random` here — a local import makes
             # `random` function-local for the WHOLE function, which crashed
             # the scifi/horror branches below with UnboundLocalError.
-            # Rotate the HOOK style so openings don't all start "When you feel..."
-            hook_styles = [
-                'a direct question (e.g. "Have you ever wondered if anyone really sees your struggle?")',
-                'a quiet observation (e.g. "There is a kind of tired that sleep cannot fix.")',
-                'a gentle second-person statement (e.g. "You have carried this longer than anyone knows.")',
-                'a small relatable scene (e.g. "It is late, the house is quiet, and your mind will not rest.")',
-                'a reassuring promise (e.g. "Before this day even began, you were already loved.")',
-                'a "when you..." line, used SPARINGLY (e.g. "When the weight feels like too much, hear this.")',
-            ]
-            # Rotate the CLOSING takeaway so it is not always "Carry this peace with you today."
-            closings = [
-                '"Let this settle into your heart today."',
-                '"Hold onto this as you go."',
-                '"Breathe, and let Him carry the rest."',
-                '"Rest in that truth tonight."',
-                '"Take this with you into whatever comes next."',
-                '"Let it quiet your heart."',
-                '"You can rest in that."',
-                '"Walk gently today, knowing this."',
-            ]
-            hook_style = random.choice(hook_styles)
-            closing_ex = random.choice(closings)
+            # Rotate hook style + closing, weighted by real performance
+            # (see weighted_variant). The chosen variants are recorded on
+            # self so generate() can save them with the script.
+            hook_style = weighted_variant("hook_style", _BIBLE_HOOK_STYLES)
+            closing_ex = weighted_variant("closing", _BIBLE_CLOSINGS)
+            self._last_variants = {"hook_style": hook_style, "closing": closing_ex}
             return f"""You are writing a short, uplifting Christian devotional for a YouTube Short (vertical, ~45 seconds). It pairs ONE real Bible verse with a warm, encouraging reflection.
 
 THE VERSE (King James Version) — use it EXACTLY as written, do not change a single word:
@@ -635,7 +684,8 @@ Write the complete devotional with clear section markers like [HOOK], [VERSE], [
                 "CHANNEL_STYLE",
                 "Tense near-future sci-fi about technology and AI turning wrong. Grounded, "
                 "plausible, and unsettling — quiet dread rather than action.")
-            ending_style = random.choice(_ENDING_STYLES)
+            ending_style = weighted_variant("ending_style", _ENDING_STYLES)
+            self._last_variants = {"ending_style": ending_style}
             return f"""You are a sharp science-fiction writer crafting an ORIGINAL near-future tech-horror story for a YouTube Short (vertical, ~60 seconds).
 
 CHANNEL STYLE: {channel_style}
@@ -666,7 +716,8 @@ Write the complete story with clear section markers like [HOOK], [BUILD], [TWIST
                 "CHANNEL_STYLE",
                 "Tense, atmospheric horror that hooks in the first line and ends on a "
                 "chilling twist. Creepy and suspenseful, never gory.")
-            ending_style = random.choice(_ENDING_STYLES)
+            ending_style = weighted_variant("ending_style", _ENDING_STYLES)
+            self._last_variants = {"ending_style": ending_style}
             return f"""You are a master horror storyteller writing an ORIGINAL scary story for a YouTube Short (vertical, ~60 seconds).
 
 CHANNEL STYLE: {channel_style}

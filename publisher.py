@@ -456,11 +456,14 @@ class AnalyticsTracker:
         except OSError as e:
             logger.error(f"Failed to save analytics: {e}")
 
-    def record_upload(self, video_id: str, title: str, category: str):
-        """Record a new upload."""
+    def record_upload(self, video_id: str, title: str, category: str,
+                      variants: Optional[Dict[str, str]] = None):
+        """Record a new upload (with the script's rotation variants, so the
+        stats refresher can learn which hook/ending/closing styles perform)."""
         self.data[video_id] = {
             "title": title,
             "category": category,
+            "variants": variants or {},
             "uploaded_at": datetime.now(timezone.utc).isoformat(),
             "views": 0,
             "likes": 0,
@@ -479,6 +482,89 @@ class AnalyticsTracker:
             self.data[video_id]["estimated_retention"] = retention
             self.data[video_id]["last_updated"] = datetime.now(timezone.utc).isoformat()
             self._save()
+
+    # ── Analytics feedback loop ──────────────────────────────────────────
+
+    VARIANT_STATS_FILE = STATE_DIR / "variant_stats.json"
+
+    async def refresh_video_stats(self, oauth: "YouTubeOAuth",
+                                  max_videos: int = 50) -> int:
+        """Pull views/likes/comments for the most recent uploads.
+
+        Cheap by design: one videos.list call per 50 ids costs 1 quota unit
+        (an upload costs ~1600). Skips dry-run ids. Returns videos updated.
+        """
+        ids = [vid for vid, d in sorted(
+                   self.data.items(),
+                   key=lambda kv: kv[1].get("uploaded_at", ""), reverse=True)
+               if vid and not vid.startswith("dry_run")][:max_videos]
+        if not ids:
+            return 0
+        token = await oauth.get_access_token()
+        if not token:
+            logger.warning("Stats refresh skipped: no YouTube token")
+            return 0
+        updated = 0
+        try:
+            async with aiohttp.ClientSession() as session:
+                for i in range(0, len(ids), 50):   # API max 50 ids per call
+                    batch = ids[i:i + 50]
+                    async with session.get(
+                        "https://www.googleapis.com/youtube/v3/videos",
+                        params={"part": "statistics", "id": ",".join(batch)},
+                        headers={"Authorization": f"Bearer {token}"},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp:
+                        if resp.status != 200:
+                            body = (await resp.text())[:200]
+                            logger.warning(f"Stats fetch failed: {resp.status} {body}")
+                            break
+                        for item in (await resp.json()).get("items", []):
+                            vid = item.get("id")
+                            st = item.get("statistics", {})
+                            if vid in self.data:
+                                d = self.data[vid]
+                                d["views"] = int(st.get("viewCount", 0) or 0)
+                                d["likes"] = int(st.get("likeCount", 0) or 0)
+                                d["comments"] = int(st.get("commentCount", 0) or 0)
+                                d["last_updated"] = datetime.now(timezone.utc).isoformat()
+                                updated += 1
+        except Exception as e:
+            logger.error(f"Stats refresh error: {e}")
+        if updated:
+            self._save()
+            self.rebuild_variant_stats()
+            logger.info(f"Refreshed stats for {updated} video(s)")
+        return updated
+
+    def rebuild_variant_stats(self) -> dict:
+        """Aggregate per-variant performance from analytics.json into
+        state/variant_stats.json — read by script.weighted_variant() to bias
+        rotation toward what actually gets watched."""
+        agg: Dict[str, Dict[str, dict]] = {}
+        for vid, d in self.data.items():
+            if vid.startswith("dry_run"):
+                continue
+            views = int(d.get("views", 0) or 0)
+            likes = int(d.get("likes", 0) or 0)
+            for kind, value in (d.get("variants") or {}).items():
+                slot = agg.setdefault(kind, {}).setdefault(
+                    value, {"videos": 0, "total_views": 0, "total_likes": 0})
+                slot["videos"] += 1
+                slot["total_views"] += views
+                slot["total_likes"] += likes
+        for kind in agg:
+            for value, s in agg[kind].items():
+                n = max(s["videos"], 1)
+                s["avg_views"] = round(s["total_views"] / n, 2)
+                s["avg_likes"] = round(s["total_likes"] / n, 2)
+        out = {"generated_at": datetime.now(timezone.utc).isoformat(),
+               "variants": agg}
+        try:
+            atomic_write_json(self.VARIANT_STATS_FILE, out)
+        except OSError as e:
+            logger.error(f"Failed to save variant stats: {e}")
+        return out
 
     def get_best_performers(self, top_n: int = 5) -> List[dict]:
         """Get top performing videos by views."""
@@ -662,7 +748,8 @@ class PublisherPipeline:
                       title: str, description: str, tags: List[str],
                       category: str,
                       privacy_status: str = "private",
-                      schedule_hours_from_now: Optional[int] = None) -> Optional[str]:
+                      schedule_hours_from_now: Optional[int] = None,
+                      variants: Optional[Dict[str, str]] = None) -> Optional[str]:
         """
         Full publishing pipeline.
         Returns video_id on success, None on failure.
@@ -735,11 +822,16 @@ class PublisherPipeline:
 
         if result and result.get("id"):
             video_id = result["id"]
-            self.analytics.record_upload(video_id, title, category)
+            self.analytics.record_upload(video_id, title, category, variants)
             logger.info(f"Published: {title} (ID: {video_id})")
             return video_id
 
         return None
+
+    async def refresh_stats(self) -> int:
+        """Pull fresh view counts and rebuild per-variant performance.
+        Called daily by the scheduler; also usable standalone."""
+        return await self.analytics.refresh_video_stats(self.uploader.oauth)
 
     async def get_daily_stats(self) -> Dict[str, Any]:
         """Get daily publishing statistics."""
