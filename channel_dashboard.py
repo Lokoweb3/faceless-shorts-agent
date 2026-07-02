@@ -12,17 +12,52 @@ generate one video now, and edit the common settings in that channel's .env.
 Binds to 127.0.0.1 only — it is never exposed to your network. Even so, it can
 read and write .env files (which hold secrets), so only run it on your own machine.
 """
+import hmac
 import json
 import os
+import secrets
 import signal
 import subprocess
 import sys
+from http import cookies as http_cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHANNELS_FILE = os.path.join(HERE, "channels.json")
 PORT = 8800
+
+# ── Access control ────────────────────────────────────────────────────────────
+# This panel reads and WRITES .env files (API keys) over HTTP, so even on
+# localhost it must not be callable by other local users, random LAN devices,
+# or web pages abusing the browser (CSRF / DNS-rebinding). Defense:
+#   1. A random token is generated at startup and shown only in the terminal.
+#      The first visit (via the printed URL) exchanges it for an HttpOnly,
+#      SameSite=Strict cookie; every request must carry token or cookie.
+#   2. The Host header must be a localhost form — a DNS-rebound hostname
+#      pointing at 127.0.0.1 fails this check before auth is even considered.
+AUTH_TOKEN = secrets.token_urlsafe(24)
+
+_ALLOWED_HOSTS = {
+    f"127.0.0.1:{PORT}", f"localhost:{PORT}", f"[::1]:{PORT}",
+    "127.0.0.1", "localhost", "[::1]",
+}
+
+
+def _host_allowed(host: str) -> bool:
+    return (host or "").strip().lower() in _ALLOWED_HOSTS
+
+
+LOCKED_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Channel Control — locked</title></head>
+<body style="font-family:system-ui;background:#0a0d12;color:#eef3f9;
+display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
+<div style="max-width:460px;text-align:center">
+<h2>🔒 Channel Control is locked</h2>
+<p style="color:#7e8a9a;line-height:1.6">Open the exact URL printed in the
+terminal where you started it — it contains a one-time access token.<br><br>
+If you restarted the dashboard, a new token was generated: check the
+terminal again.</p></div></body></html>"""
 
 # Settings surfaced in the quick-edit form (operational, non-secret).
 QUICK_FIELDS = [
@@ -255,9 +290,49 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass  # quiet
 
+    # ── security gate (see AUTH_TOKEN block at top) ──────────────────────
+
+    def _client_token(self, u) -> str:
+        """Token from the ?token= query param (first visit) or the cookie."""
+        q = parse_qs(u.query).get("token", [""])[0]
+        if q:
+            return q
+        jar = http_cookies.SimpleCookie(self.headers.get("Cookie", ""))
+        morsel = jar.get("cc_auth")
+        return morsel.value if morsel else ""
+
+    def _gate(self, u) -> bool:
+        """True if the request may proceed; otherwise a 403 has been sent."""
+        if not _host_allowed(self.headers.get("Host", "")):
+            self._send(403, "Forbidden: unexpected Host header.", "text/plain")
+            return False
+        if hmac.compare_digest(self._client_token(u), AUTH_TOKEN):
+            return True
+        if u.path == "/":
+            self._send(403, LOCKED_PAGE, "text/html; charset=utf-8")
+        else:
+            self._json({"ok": False, "error": "unauthorized"}, 403)
+        return False
+
     def do_GET(self):
         u = urlparse(self.path)
+        if not self._gate(u):
+            return
         if u.path == "/":
+            # First visit arrives with ?token=... — exchange it for an
+            # HttpOnly SameSite=Strict cookie and clean the address bar.
+            if parse_qs(u.query).get("token", [""])[0]:
+                try:
+                    self.send_response(303)
+                    self.send_header("Location", "/")
+                    self.send_header(
+                        "Set-Cookie",
+                        f"cc_auth={AUTH_TOKEN}; HttpOnly; SameSite=Strict; Path=/")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
             return self._send(200, PAGE, "text/html; charset=utf-8")
         if u.path == "/api/status":
             chans = load_channels()
@@ -310,6 +385,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
+        if not self._gate(u):
+            return
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b"{}"
         try:
@@ -777,10 +854,17 @@ render(); setInterval(render, 4000);
 def main():
     load_channels()  # ensure channels.json exists
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    url = f"http://127.0.0.1:{PORT}/?token={AUTH_TOKEN}"
     print("\n  Channel Control running")
-    print(f"  → open http://127.0.0.1:{PORT} in your browser")
+    print(f"  → open this exact URL (contains your access token):")
+    print(f"    {url}")
     print(f"  → channels file: {CHANNELS_FILE}")
     print("  → Ctrl+C to stop\n")
+    try:
+        import webbrowser
+        webbrowser.open(url)
+    except Exception:
+        pass
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
