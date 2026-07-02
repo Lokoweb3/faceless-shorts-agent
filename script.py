@@ -191,6 +191,17 @@ class ScriptGenerator:
         ai_text = await self._call_ai(prompt)
 
         if not ai_text:
+            # Story/devotional modes must NEVER publish the canned fallback:
+            # it's the same weak text every run (and for bible mode it would be
+            # a soccer-flavored template). Fail the item instead — the scheduler
+            # simply retries next cycle, so a provider outage costs time, not
+            # channel quality.
+            if CONTENT_MODE in ("scifi", "horror", "bible"):
+                logger.error("AI generation failed — skipping this item "
+                             "(story modes never use the template fallback). "
+                             "Check your AI provider/key; the agent will retry "
+                             "next cycle.")
+                return None
             logger.warning("AI generation failed, using template-based fallback")
             ai_text = self._fallback_generate(content_item, template)
 
@@ -357,7 +368,7 @@ class ScriptGenerator:
     async def generate_title(self, story_text: str) -> str:
         """Generate a punchy, sub-60-char, keyword-first YouTube Shorts title."""
         if CONTENT_MODE == "bible":
-            import random
+            # (uses the module-level random import — see note in _build_prompt)
             # Rotate the emotional angle so titles don't cluster on one feeling
             # (analytics showed "overwhelmed" getting saturated). Pick a few to
             # steer toward, and explicitly steer away from the overused one.
@@ -418,13 +429,20 @@ class ScriptGenerator:
         if avoid:
             avoid_block = ("\n\nDo NOT repeat or closely echo any of these already-used "
                            "ideas:\n- " + "\n- ".join(avoid[:25]))
+        # Variety engine: force each sci-fi premise onto a DIFFERENT technology
+        # so auto-generated premises can't cluster on smart-home/assistant plots.
+        tech_block = ""
+        if mode == "scifi":
+            angles = random.sample(_TECH_ANGLES, min(max(n, 1), len(_TECH_ANGLES)))
+            tech_block = ("\nBase each premise on a DIFFERENT one of these technologies "
+                          "(one each, any order):\n- " + "\n- ".join(angles))
         prompt = (
             f"Generate {n} ORIGINAL, distinct one-sentence story premises for {genre} "
             f"YouTube Shorts.\n"
             "Each premise: a single vivid sentence with an unsettling hook, third person.\n"
             "Make them clearly different from each other.\n"
             f"Output exactly {n} lines, one premise per line. No numbering, no commentary."
-            f"{avoid_block}"
+            f"{tech_block}{avoid_block}"
         )
         try:
             out = await self._call_ai(prompt)
@@ -468,7 +486,9 @@ class ScriptGenerator:
         if CONTENT_MODE == "bible":
             reference = title
             verse_text = description
-            import random
+            # NOTE: no local `import random` here — a local import makes
+            # `random` function-local for the WHOLE function, which crashed
+            # the scifi/horror branches below with UnboundLocalError.
             # Rotate the HOOK style so openings don't all start "When you feel..."
             hook_styles = [
                 'a direct question (e.g. "Have you ever wondered if anyone really sees your struggle?")',
@@ -784,17 +804,12 @@ Write the complete script with clear section markers like [HOOK], [SETUP], etc.
             return None
 
     def _fallback_generate(self, content_item: Any, template: ScriptTemplate) -> str:
-        """Generate a script using template-based fallback when AI is unavailable."""
-        # Story modes (scifi/horror) must NEVER fall back to soccer templates.
-        if CONTENT_MODE in ("scifi", "horror"):
-            t = getattr(content_item, "title", "") or "the device"
-            return (
-                f"[HOOK]\nSomething about {t} was wrong, and I noticed it too late.\n\n"
-                f"[BUILD]\nIt started small. A reply I never asked for. A light that "
-                f"shouldn't have been on. The more I watched it, the more certain I "
-                f"became that it was watching me back, learning the shape of my fear.\n\n"
-                f"[TWIST]\nBy the time I understood what it wanted, it already had it."
-            )
+        """Template-based fallback when AI is unavailable (news modes only).
+
+        Story/bible modes never reach this — generate() fails the item instead,
+        because a canned identical story published repeatedly is worse than a
+        skipped cycle.
+        """
         title = getattr(content_item, 'title', 'Untitled Story')
         description = getattr(content_item, 'description', '')
 
