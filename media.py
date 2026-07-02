@@ -53,6 +53,22 @@ except ValueError:
     _AI_IMAGE_INTERVAL = 4.0
 _POLLINATIONS_LIMITER = _MinIntervalLimiter(_AI_IMAGE_INTERVAL)
 
+
+# One of these is picked per VIDEO and appended to all of its image prompts,
+# so the images within a video share a cohesive look while different videos
+# still vary. Hue-neutral (lens/grain/contrast only) so no mood is imposed
+# on any niche.
+_VIDEO_STYLE_MODIFIERS = [
+    "soft film grain, shallow depth of field",
+    "anamorphic lens look, gentle lens flare, cinematic contrast",
+    "muted desaturated palette, subtle vignette",
+    "rich deep shadows, high contrast lighting",
+    "hazy atmospheric light, filmic texture",
+    "crisp clean detail, balanced natural light",
+    "low-angle dramatic perspective, strong silhouettes",
+    "dreamy soft-focus glow, fine grain",
+]
+
 # ─── Utility ──────────────────────────────────────────────────────────────────
 
 def _run_ffmpeg(cmd: List[str], timeout: int = 300) -> Tuple[bool, str]:
@@ -1308,6 +1324,14 @@ class MediaPipeline:
             logger.info("Using story-matched scene prompts for visuals")
         else:
             terms = self._search_terms(category, title)
+
+        # Visual cohesion: one style modifier per VIDEO, applied to every
+        # image prompt — images within a video match; videos still vary.
+        if config.video.asset_provider == "ai_image":
+            import random
+            style_seed = random.choice(_VIDEO_STYLE_MODIFIERS)
+            terms = [f"{t}, {style_seed}" for t in terms]
+            logger.info(f"Video style seed: {style_seed}")
 
         # 3. Fetch + normalize each segment (licensed stock or generated).
         norm_clips: List[Path] = []

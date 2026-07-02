@@ -341,6 +341,7 @@ class ScriptGenerator:
                 "- Each line is an atmospheric, futuristic, SYMBOLIC scene (glowing screens, "
                 "server rooms, empty smart homes, neon cityscapes, drones, holograms, dim labs).\n"
                 "- Cold, eerie, high-tech mood. NO faces, NO text or logos in the image.\n"
+                "- The FIRST line must visualize the story's OPENING SENTENCE — the exact anomaly or image it names — so the first frame matches the hook.\n"
                 "- No numbering, no commentary — just the lines."
             )
         elif CONTENT_MODE == "horror":
@@ -354,6 +355,7 @@ class ScriptGenerator:
                 "- Each line is an atmospheric, unsettling, SYMBOLIC scene (empty rooms, "
                 "long shadows, fog, moonlit windows, dim hallways, silhouettes, old objects).\n"
                 "- Creepy and suspenseful, NOT gory or graphic. No blood, no faces.\n"
+                "- The FIRST line must visualize the story's OPENING SENTENCE — the exact anomaly or image it names — so the first frame matches the hook.\n"
                 "- No text or logos in the image. No numbering, no commentary — just the lines."
             )
         elif CONTENT_MODE == "bible":
@@ -369,6 +371,7 @@ class ScriptGenerator:
                 "holy-land vistas, a single candle, light breaking through darkness, doves, paths).\n"
                 "- Warm, hopeful, majestic mood. NO people's faces, NO depictions of God or "
                 "Jesus, NO text or letters in the image.\n"
+                "- The FIRST line must visualize the devotional's OPENING LINE, so the first frame matches the hook.\n"
                 "- No numbering, no commentary — just the lines."
             )
         else:
@@ -382,6 +385,7 @@ class ScriptGenerator:
                 "- Each line is a vivid, atmospheric, SYMBOLIC scene (stadiums, the ball, "
                 "crowds, floodlights, silhouettes, weather, light, motion, emotion).\n"
                 "- NO real player names, NO recognizable faces, NO text or logos in the image.\n"
+                "- The FIRST line must visualize the narration's OPENING SENTENCE, so the first frame matches the hook.\n"
                 "- No numbering, no bullets, no extra commentary — just the lines."
             )
         out = await self._call_ai(prompt)
@@ -703,6 +707,7 @@ RULES:
 - About 100-130 words (about 45 seconds spoken) — tighter is better for retention. Short, punchy sentences.
 - Grounded and believable — near-future, not space opera. Unsettling, NOT gory.
 - ENDING FOR THIS STORY: land the twist as {ending_style}. Do NOT default to the narrator dying, being deleted, replaced, or "uploaded" — vary it.
+- LOOP (retention): write the FINAL line so it flows naturally back into the FIRST line — a viewer whose Short loops to the start should feel seamless, chilling continuity. Do NOT literally repeat the first line.
 - VARIETY (important): do NOT fall back on overused setups — avoid the smart-home-seals-you-inside plot, "optimization/your safety" gas or lockdowns, the "AI deletes/replaces/harvests the human" plot, and the twists "I'm not the real one / it's a simulation" or "I'm being deprecated/deleted." Invent a genuinely different threat and setting. Look at the ALREADY-MADE list and go somewhere new.
 - CONTENT SAFETY (mandatory): NO suicide, self-harm, or methods of self-harm; NO sexual content or sexual violence; NO minors in unsafe situations; NO graphic gore, torture, or real-world dangerous instructions. Keep it psychological and suspenseful — dread, not graphic harm.
 - Output ONLY the spoken story text — no stage directions, emojis, or notes.
@@ -735,6 +740,7 @@ RULES:
 - About 100-130 words (about 45 seconds spoken) — tighter is better for retention. Short, punchy sentences.
 - Creepy and suspenseful, NOT graphic or gory. No extreme violence.
 - ENDING FOR THIS STORY: land the twist as {ending_style}. Vary it — do not end the same way every time.
+- LOOP (retention): write the FINAL line so it flows naturally back into the FIRST line — a viewer whose Short loops to the start should feel seamless, chilling continuity. Do NOT literally repeat the first line.
 - CONTENT SAFETY (mandatory): NO suicide, self-harm, or methods of self-harm; NO sexual content or sexual violence; NO minors in unsafe situations; NO graphic gore, torture, or real-world dangerous instructions. Keep it psychological and suspenseful — dread, not graphic harm.
 - Output ONLY the spoken story text — no stage directions, emojis, or notes.
 
