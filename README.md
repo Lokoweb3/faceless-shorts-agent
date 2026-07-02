@@ -144,10 +144,14 @@ Review your first videos (set to **private**) before switching `UPLOAD_PRIVACY=p
 generate one now, edit each channel's `.env`, watch logs). Run:
 
 ```bash
-python3 channel_dashboard.py     # then open http://127.0.0.1:8800
+python3 channel_dashboard.py
 ```
 
-It binds to localhost only and edits your local `.env` files. Personal use only.
+It prints (and opens) a URL containing a **one-time access token** — use that exact
+URL. Every dashboard in this project requires its token and rejects non-localhost
+requests, so other devices, other local users, and malicious web pages can't reach
+the endpoints that read/write your keys. If you restart a dashboard, grab the fresh
+URL from the terminal.
 
 ---
 

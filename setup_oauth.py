@@ -99,6 +99,11 @@ def _write_env(new_values: dict) -> None:
         for k, v in remaining.items():
             out.append(f"{k}={v}")
     ENV_FILE.write_text("\n".join(out) + "\n", encoding="utf-8")
+    try:
+        import os
+        os.chmod(ENV_FILE, 0o600)  # owner-only (no-op on Windows-mounted drives)
+    except OSError:
+        pass
 
 
 def _mask(secret: str) -> str:

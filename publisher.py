@@ -154,6 +154,7 @@ class YouTubeOAuth:
         }
         try:
             atomic_write_json(self.TOKEN_FILE, data)
+            os.chmod(self.TOKEN_FILE, 0o600)  # owner-only (no-op on DrvFs)
         except OSError as e:
             logger.error(f"Failed to save token: {e}")
 

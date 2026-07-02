@@ -114,8 +114,9 @@ async def generate(request):
     return web.json_response({"title": title, "captions": captions, "saved": saved})
 
 
-def build_app():
-    app = web.Application()
+def build_app(auth_token: str):
+    from localweb import security_middleware
+    app = web.Application(middlewares=[security_middleware(auth_token)])
     app.router.add_get("/", index)
     app.router.add_get("/api/scripts", list_scripts)
     app.router.add_post("/api/generate", generate)
@@ -127,9 +128,13 @@ def main():
     ap.add_argument("--port", type=int, default=8788)
     ap.add_argument("--host", default="127.0.0.1")
     args = ap.parse_args()
-    print(f"\n  Caption Studio running at  http://{args.host}:{args.port}\n")
-    print("  Open that link in your browser. Ctrl+C to stop.\n")
-    web.run_app(build_app(), host=args.host, port=args.port, print=None)
+    from localweb import make_token
+    token = make_token()
+    open_host = "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host
+    print(f"\n  Caption Studio — open this exact URL (contains your access token):")
+    print(f"  http://{open_host}:{args.port}/?token={token}\n")
+    print("  Ctrl+C to stop.\n")
+    web.run_app(build_app(token), host=args.host, port=args.port, print=None)
 
 
 HTML = r"""<!DOCTYPE html>

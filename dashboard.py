@@ -231,8 +231,10 @@ async def error_middleware(request, handler):
             {"error": f"{type(e).__name__}: {e}"}, status=500)
 
 
-def build_app() -> web.Application:
-    app = web.Application(middlewares=[error_middleware])
+def build_app(auth_token: str) -> web.Application:
+    from localweb import security_middleware
+    app = web.Application(middlewares=[security_middleware(auth_token),
+                                       error_middleware])
     app.add_routes([
         web.get("/", index),
         web.get("/api/status", api_status),
@@ -259,13 +261,18 @@ def main():
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    from storage import RedactingFilter
+    for h in logging.getLogger().handlers:
+        h.addFilter(RedactingFilter())
 
     # Browsers can't reach the server from a file:// page, so always open the
     # http URL ourselves (use a loopback host even if bound to 0.0.0.0).
+    from localweb import make_token
+    token = make_token()
     open_host = "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host
-    url = f"http://{open_host}:{args.port}"
+    url = f"http://{open_host}:{args.port}/?token={token}"
 
-    app = build_app()
+    app = build_app(token)
     if not args.no_browser:
         async def _open(_app):
             import webbrowser
@@ -275,8 +282,9 @@ def main():
                 pass
         app.on_startup.append(_open)
 
-    print(f"\n  Control room  →  {url}")
-    print("  (open this URL in your browser — do NOT open dashboard.html directly)\n")
+    print(f"\n  Control room  →  open this exact URL (contains your access token):")
+    print(f"  {url}")
+    print("  (do NOT open dashboard.html directly)\n")
     web.run_app(app, host=args.host, port=args.port, print=None)
 
 

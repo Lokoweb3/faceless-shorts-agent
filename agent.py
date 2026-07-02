@@ -713,6 +713,11 @@ async def main():
             logging.StreamHandler(),
         ]
     )
+    # Safety net: no API key/token ever reaches a log line (users paste logs
+    # into GitHub issues).
+    from storage import RedactingFilter
+    for h in logging.getLogger().handlers:
+        h.addFilter(RedactingFilter())
 
     # Set dry run mode
     if args.dry_run:

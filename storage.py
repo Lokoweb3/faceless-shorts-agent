@@ -15,12 +15,44 @@ Every state/queue/history file in the project goes through these so that:
 import json
 import logging
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class RedactingFilter(logging.Filter):
+    """Defense-in-depth: strip API keys/tokens from every log record.
+
+    Providers pass keys in headers (which exceptions don't include), and the
+    one key-in-URL service (Pollinations) is redacted at the call site — this
+    filter is the safety net for anything missed, because users paste logs
+    into GitHub issues. Install on root handlers:
+        for h in logging.getLogger().handlers: h.addFilter(RedactingFilter())
+    """
+
+    _PATTERNS = (
+        (re.compile(r'([?&](?:api_?key|key|token|access_token|auth)=)[^&\s\'"]+',
+                    re.IGNORECASE), r"\1REDACTED"),
+        (re.compile(r"\b(sk_|sk-|el_|xai-|1//)[A-Za-z0-9_\-\.]{8,}"), r"\1REDACTED"),
+        (re.compile(r"\b(Bearer\s+)[A-Za-z0-9_\-\.]{12,}"), r"\1REDACTED"),
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+            red = msg
+            for pat, sub in self._PATTERNS:
+                red = pat.sub(sub, red)
+            if red != msg:
+                record.msg = red
+                record.args = ()
+        except Exception:
+            pass  # never let logging hygiene break logging itself
+        return True
 
 
 def atomic_write_json(path: Path, data: Any, indent: int = 2) -> None:
