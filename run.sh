@@ -14,6 +14,7 @@
 #   --discover   Run discovery only and show results
 #   --dashboard  Launch the web control room (http://127.0.0.1:8787)
 #   --auth       Guided YouTube OAuth setup (writes tokens to .env)
+#   --doctor     Health check: system, config, YouTube auth, AI, images
 #   --help       Show this help message
 # =============================================================================
 
@@ -165,6 +166,13 @@ main() {
     if [[ "${1:-}" == "--auth" ]]; then
         log_info "Launching YouTube OAuth setup wizard..."
         python3 setup_oauth.py
+        return $?
+    fi
+
+    # Health check
+    if [[ "${1:-}" == "--doctor" ]]; then
+        shift
+        python3 doctor.py "$@"
         return $?
     fi
 
