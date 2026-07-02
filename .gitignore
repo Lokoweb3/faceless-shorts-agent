@@ -1,0 +1,44 @@
+# ─── SECRETS — never commit these ────────────────────────────
+.env
+.env.backup
+*.env
+!.env.example
+channels.json
+state/youtube_token.json
+**/youtube_token.json
+config_saved.json
+
+# ─── Generated output (videos, audio, scripts, thumbnails) ───
+output/
+outputs/
+*.mp4
+*.mp3
+*.wav
+*.jpg
+*.jpeg
+*.png
+!assets/**          # keep bundled brand assets if any
+
+# ─── Runtime state & logs ────────────────────────────────────
+state/
+data/
+logs/
+*.log
+agent.pid
+
+# ─── Python ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.Python
+
+# ─── Editor / OS noise ───────────────────────────────────────
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.db
+*.swp

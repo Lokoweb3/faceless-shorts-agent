@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Control Room</title>
+<style>
+  /* ── Floodlit-matchday control room ──────────────────────────────
+     Palette
+       --pitch  #0B1220  deep blue-charcoal base (the night sky over a stadium)
+       --tunnel #131C2E  raised panels
+       --line   #24314A  hairlines
+       --chalk  #E8EDF6  primary text (touchline paint)
+       --touch  #8497B5  muted text
+       --flood  #F5C451  floodlight amber  -> attention / primary action
+       --tally  #FF3B30  broadcast red     -> ON AIR / live only
+       --turf   #3DD68C  confirmation green -> published / success
+     Type: system sans for prose, system mono for the scoreboard readouts. */
+  :root{
+    --pitch:#0B1220; --tunnel:#131C2E; --tunnel2:#0F1726; --line:#24314A;
+    --chalk:#E8EDF6; --touch:#8497B5; --flood:#F5C451; --tally:#FF3B30; --turf:#3DD68C;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:
+      radial-gradient(1200px 500px at 50% -200px, #1a2740 0%, transparent 60%),
+      var(--pitch);
+    color:var(--chalk); font-family:var(--sans); line-height:1.5;
+    min-height:100vh; padding:24px;
+  }
+  .wrap{max-width:1080px; margin:0 auto}
+
+  /* gantry bar */
+  .gantry{display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:22px}
+  .brand .eyebrow{font:600 11px/1 var(--mono); letter-spacing:.22em; text-transform:uppercase; color:var(--touch)}
+  .brand h1{margin:6px 0 0; font-size:26px; letter-spacing:-.01em; font-weight:800}
+  .brand h1 span{color:var(--flood)}
+
+  .tally{display:flex; align-items:center; gap:10px; padding:9px 14px; border:1px solid var(--line);
+    border-radius:999px; background:var(--tunnel); font:600 12px/1 var(--mono); letter-spacing:.16em; text-transform:uppercase}
+  .dot{width:10px; height:10px; border-radius:50%; background:var(--touch); box-shadow:0 0 0 0 transparent}
+  .tally.live .dot{background:var(--tally); animation:pulse 1.2s infinite}
+  .tally.live{border-color:#5a1c19; color:#ffd9d6}
+  .tally.dry .dot{background:var(--flood)}
+  .tally.dry{border-color:#5a4a1c; color:#ffe9b0}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,59,48,.5)}70%{box-shadow:0 0 0 9px rgba(255,59,48,0)}100%{box-shadow:0 0 0 0 rgba(255,59,48,0)}}
+  @media (prefers-reduced-motion:reduce){.tally.live .dot{animation:none}}
+
+  /* scoreboard */
+  .board{display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:22px}
+  .stat{background:linear-gradient(180deg,var(--tunnel),var(--tunnel2)); border:1px solid var(--line);
+    border-radius:14px; padding:16px 18px}
+  .stat .k{font:600 10px/1 var(--mono); letter-spacing:.18em; text-transform:uppercase; color:var(--touch)}
+  .stat .v{font:700 34px/1.05 var(--mono); margin-top:12px; letter-spacing:-.02em}
+  .stat .v small{font-size:18px; color:var(--touch); font-weight:600}
+  .stat.accent .v{color:var(--flood)}
+
+  /* controls */
+  .controls{display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:26px}
+  button{font-family:var(--sans); font-weight:600; font-size:14px; cursor:pointer; border-radius:10px;
+    padding:11px 18px; border:1px solid var(--line); background:var(--tunnel); color:var(--chalk); transition:.15s}
+  button:hover:not(:disabled){border-color:#3a4d70; transform:translateY(-1px)}
+  button:disabled{opacity:.5; cursor:not-allowed}
+  button.primary{background:var(--flood); color:#23190a; border-color:var(--flood)}
+  button.primary:hover:not(:disabled){box-shadow:0 6px 18px rgba(245,196,81,.25)}
+  .switch{display:flex; align-items:center; gap:9px; margin-left:auto; color:var(--touch); font-size:13px; user-select:none}
+  .switch input{appearance:none; width:42px; height:24px; border-radius:999px; background:var(--line); position:relative; cursor:pointer; transition:.2s}
+  .switch input:checked{background:var(--flood)}
+  .switch input::after{content:""; position:absolute; top:3px; left:3px; width:18px; height:18px; border-radius:50%; background:#fff; transition:.2s}
+  .switch input:checked::after{left:21px}
+
+  /* panels */
+  .cols{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px}
+  .panel{background:var(--tunnel); border:1px solid var(--line); border-radius:14px; overflow:hidden}
+  .panel h2{margin:0; padding:14px 18px; font-size:13px; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--touch); border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center}
+  .panel h2 .count{font:600 11px/1 var(--mono); color:var(--chalk); background:var(--tunnel2); border:1px solid var(--line); padding:3px 8px; border-radius:999px}
+  .panel .body{padding:6px 0; max-height:340px; overflow:auto}
+
+  .row{display:grid; grid-template-columns:1fr auto; gap:8px; padding:11px 18px; border-bottom:1px solid rgba(36,49,74,.5)}
+  .row:last-child{border-bottom:none}
+  .row .title{font-weight:600; font-size:14px}
+  .row .meta{font:500 11px/1.4 var(--mono); color:var(--touch); margin-top:3px; text-transform:uppercase; letter-spacing:.04em}
+  .row .right{text-align:right; align-self:center}
+  .pill{font:600 10px/1 var(--mono); padding:4px 8px; border-radius:999px; text-transform:uppercase; letter-spacing:.06em}
+  .pill.queued{color:var(--flood); background:rgba(245,196,81,.12)}
+  .pill.processing{color:#7fb6ff; background:rgba(127,182,255,.12)}
+  .pill.failed{color:var(--tally); background:rgba(255,59,48,.12)}
+  .pill.done{color:var(--turf); background:rgba(61,214,140,.12)}
+  a.watch{color:var(--turf); text-decoration:none; font:600 12px var(--mono)}
+  a.watch:hover{text-decoration:underline}
+  .score{font:600 11px var(--mono); color:var(--touch)}
+
+  .empty{padding:34px 18px; text-align:center; color:var(--touch); font-size:13px}
+
+  /* comms feed */
+  .feed{background:var(--tunnel2); border:1px solid var(--line); border-radius:14px; overflow:hidden}
+  .feed h2{margin:0; padding:14px 18px; font-size:13px; letter-spacing:.06em; text-transform:uppercase; color:var(--touch); border-bottom:1px solid var(--line)}
+  pre#log{margin:0; padding:14px 18px; font:500 12px/1.6 var(--mono); color:#aebcd6; max-height:260px; overflow:auto; white-space:pre-wrap; word-break:break-word}
+
+  .foot{margin-top:18px; color:var(--touch); font-size:12px; text-align:center}
+  .toast{position:fixed; bottom:20px; left:50%; transform:translateX(-50%) translateY(80px);
+    background:var(--tunnel); border:1px solid var(--line); color:var(--chalk); padding:12px 18px; border-radius:10px;
+    font-size:13px; transition:.25s; box-shadow:0 10px 30px rgba(0,0,0,.4)}
+  .toast.show{transform:translateX(-50%) translateY(0)}
+  .toast.err{border-color:#5a1c19; color:#ffd9d6}
+
+  @media (max-width:760px){
+    .board{grid-template-columns:repeat(2,1fr)} .cols{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="gantry">
+    <div class="brand">
+      <div class="eyebrow">Faceless Channel · Control Room</div>
+      <h1 id="channel">Soccer <span>Legends</span></h1>
+    </div>
+    <div class="tally" id="tally"><span class="dot"></span><span id="tally-text">Standby</span></div>
+  </div>
+
+  <div class="board">
+    <div class="stat accent">
+      <div class="k">Published today</div>
+      <div class="v"><span id="today">0</span><small> / <span id="cap">2</span></small></div>
+    </div>
+    <div class="stat">
+      <div class="k">In queue</div>
+      <div class="v" id="queued">0</div>
+    </div>
+    <div class="stat">
+      <div class="k">Total published</div>
+      <div class="v" id="total">0</div>
+    </div>
+    <div class="stat">
+      <div class="k">Uptime</div>
+      <div class="v" style="font-size:22px" id="uptime">—</div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button class="primary" id="btn-run">Run cycle</button>
+    <button id="btn-dry">Dry run</button>
+    <button id="btn-discover">Find new topics</button>
+    <label class="switch">Dry-run mode
+      <input type="checkbox" id="dry-toggle">
+    </label>
+  </div>
+
+  <div class="cols">
+    <div class="panel">
+      <h2>Up next <span class="count" id="q-count">0</span></h2>
+      <div class="body" id="queue"></div>
+    </div>
+    <div class="panel">
+      <h2>Recently published <span class="count" id="h-count">0</span></h2>
+      <div class="body" id="history"></div>
+    </div>
+  </div>
+
+  <div class="feed">
+    <h2>Comms feed</h2>
+    <pre id="log">Waiting for activity…</pre>
+  </div>
+
+  <div class="foot">Visuals are licensed stock / generated — no broadcast footage. Review in dry-run before going public.</div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let busy = false, pollMs = 5000, timer = null;
+
+function toast(msg, err=false){
+  const t = $("toast"); t.textContent = msg; t.className = "toast show" + (err?" err":"");
+  setTimeout(()=>{ t.className = "toast" + (err?" err":""); }, 3200);
+}
+
+function setTally(state){ // 'live' | 'dry' | 'standby'
+  const el = $("tally"), txt = $("tally-text");
+  el.className = "tally" + (state==="live"?" live":state==="dry"?" dry":"");
+  txt.textContent = state==="live" ? "On air" : state==="dry" ? "Dry run" : "Standby";
+}
+
+function fmtTime(iso){
+  if(!iso) return "";
+  const d = new Date(iso); if(isNaN(d)) return "";
+  return d.toLocaleString(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
+}
+
+async function getJSON(url){ const r = await fetch(url); if(!r.ok) throw new Error((await r.json()).error||r.statusText); return r.json(); }
+async function post(url, body){
+  const r = await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
+  const j = await r.json().catch(()=>({})); if(!r.ok) throw new Error(j.error||r.statusText); return j;
+}
+
+async function refresh(){
+  try{
+    const s = await getJSON("/api/status");
+    $("channel").innerHTML = (s.channel_words||["Soccer","Legends"]).map((w,i)=> i? `<span>${w}</span>`:w).join(" ");
+    $("today").textContent = s.published_today;
+    $("cap").textContent = s.max_daily_uploads;
+    $("queued").textContent = s.queue_size;
+    $("total").textContent = s.total_published;
+    $("uptime").textContent = s.uptime_formatted || "—";
+    $("dry-toggle").checked = !!s.dry_run;
+    busy = !!s.running;
+    setTally(s.running ? "live" : (s.dry_run ? "dry" : "standby"));
+    ["btn-run","btn-dry","btn-discover"].forEach(id=>{ $(id).disabled = busy; });
+    if(busy){ $("btn-run").textContent = "Working…"; pollMs = 2500; }
+    else { $("btn-run").textContent = "Run cycle"; pollMs = 5000; }
+
+    renderQueue(await getJSON("/api/queue"));
+    renderHistory(await getJSON("/api/history"));
+    const logs = await getJSON("/api/logs");
+    const pre = $("log"); const atBottom = pre.scrollTop+pre.clientHeight >= pre.scrollHeight-20;
+    pre.textContent = logs.lines.length ? logs.lines.join("\n") : "Waiting for activity…";
+    if(atBottom) pre.scrollTop = pre.scrollHeight;
+  }catch(e){ /* keep last view; transient */ }
+  clearTimeout(timer); timer = setTimeout(refresh, pollMs);
+}
+
+function renderQueue(items){
+  $("q-count").textContent = items.length;
+  const el = $("queue");
+  if(!items.length){ el.innerHTML = `<div class="empty">No topics queued. Hit “Find new topics” to fill the queue.</div>`; return; }
+  el.innerHTML = items.map(it=>`
+    <div class="row">
+      <div><div class="title">${esc(it.title||"Untitled")}</div>
+        <div class="meta">${esc(it.category||"")} · ${esc(it.source||"")}</div></div>
+      <div class="right"><span class="pill ${it.status||"queued"}">${esc(it.status||"queued")}</span>
+        <div class="score">${it.score!=null? Number(it.score).toFixed(2):""}</div></div>
+    </div>`).join("");
+}
+
+function renderHistory(items){
+  $("h-count").textContent = items.length;
+  const el = $("history");
+  if(!items.length){ el.innerHTML = `<div class="empty">No videos published yet. A completed cycle will show up here.</div>`; return; }
+  el.innerHTML = items.map(it=>{
+    const vid = it.video_id && it.video_id!=="dry_run_video_id";
+    const link = vid ? `<a class="watch" href="https://youtube.com/watch?v=${esc(it.video_id)}" target="_blank" rel="noopener">Watch ↗</a>`
+                     : `<span class="pill ${it.video_id?'done':'failed'}">${it.video_id?"dry run":"failed"}</span>`;
+    return `<div class="row">
+      <div><div class="title">${esc(it.title||"Untitled")}</div>
+        <div class="meta">${esc(it.category||"")} · ${esc(fmtTime(it.completed_at))}</div></div>
+      <div class="right">${link}</div></div>`;
+  }).join("");
+}
+
+function esc(s){ return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+async function trigger(url, body, label){
+  if(busy) return;
+  busy = true; ["btn-run","btn-dry","btn-discover"].forEach(id=>$(id).disabled=true);
+  try{ const j = await post(url, body); toast(j.message || label); }
+  catch(e){ toast(e.message, true); }
+  setTimeout(refresh, 400);
+}
+
+$("btn-run").onclick = ()=> trigger("/api/run", {dry_run:false}, "Cycle started");
+$("btn-dry").onclick = ()=> trigger("/api/run", {dry_run:true}, "Dry run started");
+$("btn-discover").onclick = ()=> trigger("/api/discover", {}, "Searching for topics…");
+$("dry-toggle").onchange = async (e)=>{
+  try{ await post("/api/settings",{dry_run:e.target.checked}); toast(e.target.checked?"Dry-run mode on":"Dry-run mode off"); }
+  catch(err){ toast(err.message,true); }
+  refresh();
+};
+
+function showFileWarning(){
+  document.querySelector(".wrap").innerHTML = `
+    <div style="max-width:640px;margin:12vh auto 0;text-align:center">
+      <div class="eyebrow" style="color:var(--touch);font:600 11px/1 var(--mono);letter-spacing:.22em;text-transform:uppercase">Faceless Channel · Control Room</div>
+      <h1 style="font-size:26px;margin:10px 0 18px">Start the <span style="color:var(--flood)">server</span> first</h1>
+      <p style="color:var(--touch);font-size:15px">This page is open as a file, so it can't reach the agent.
+      Run the dashboard server and open the address it prints:</p>
+      <pre style="text-align:left;background:var(--tunnel2);border:1px solid var(--line);border-radius:12px;padding:16px 18px;font:500 13px/1.7 var(--mono);color:#aebcd6;overflow:auto">python dashboard.py
+<span style="color:var(--touch)"># then open in your browser:</span>
+<span style="color:var(--turf)">http://127.0.0.1:8787</span></pre>
+      <p style="color:var(--touch);font-size:13px;margin-top:16px">Tip: <code style="color:var(--flood)">./run.sh --dashboard</code> does the same on macOS/Linux.</p>
+    </div>`;
+}
+
+if (location.protocol === "file:") {
+  showFileWarning();
+} else {
+  refresh();
+}
+</script>
+</body>
+</html>

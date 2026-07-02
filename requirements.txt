@@ -1,0 +1,31 @@
+# YouTube Soccer Content Agent - Python Dependencies
+
+# Core (asyncio is part of the stdlib - do NOT install it from PyPI)
+aiohttp>=3.9.0
+
+# Content Discovery
+feedparser>=6.0.10
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Media Processing (visuals are licensed stock / generated - no footage downloading)
+Pillow>=10.0.0
+
+# Text-to-Speech
+edge-tts>=6.1.0
+
+# YouTube API
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.0.0
+google-auth-httplib2>=0.1.0
+
+# AI script generation (at least one recommended)
+anthropic>=0.39.0
+openai>=1.0.0
+
+# Utilities
+python-dotenv>=1.0.0
+
+# System dependency (NOT pip): ffmpeg + ffprobe must be on PATH.
+#   macOS:  brew install ffmpeg
+#   Ubuntu: sudo apt install ffmpeg
