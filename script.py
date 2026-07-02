@@ -368,13 +368,51 @@ class ScriptGenerator:
         t = t.lower().replace("#shorts", "")
         return re.sub(r"[^a-z0-9 ]", "", t).strip()
 
-    def _title_problem(self, title: str, recent_norm: set) -> str:
-        """Return why a title is unacceptable, or '' if it's fine."""
+    # How far back the fatigue windows look. A lead word ("Peace ...") may
+    # not repeat within the last 4 titles; a feeling ("... Burned Out") not
+    # within the last 8. Exact duplicates are rejected against the whole
+    # remembered window (40).
+    _LEAD_COOLDOWN = 4
+    _FEELING_COOLDOWN = 8
+
+    @classmethod
+    def _title_lead(cls, t: str) -> str:
+        words = cls._norm_title(t).split()
+        return words[0] if words else ""
+
+    @classmethod
+    def _title_feeling(cls, t: str) -> str:
+        """The emotional tail of a formula title: whatever follows
+        'you feel'/'you are', else the last two words."""
+        norm = cls._norm_title(t)
+        for marker in (" you feel ", " you are "):
+            if marker in norm:
+                return norm.split(marker, 1)[1].strip()
+        words = norm.split()
+        return " ".join(words[-2:]) if len(words) >= 2 else norm
+
+    def _title_problem(self, title: str, recent: list) -> str:
+        """Return why a title is unacceptable, or '' if it's fine.
+
+        Checks exact duplicates AND formula fatigue: the channel's titles all
+        share the '<Lead> For When You Feel <Feeling>' shape, so repeating
+        the lead or the feeling within a short window reads as the same
+        video even when the full title differs ('Peace For When You Feel X'
+        five posts in a row).
+        """
         low = title.lower()
         if any(w in low for w in NICHE.banned_title_words):
             return "banned word"
+        recent_norm = {self._norm_title(t) for t in recent}
         if self._norm_title(title) in recent_norm:
             return "duplicate of a recent title"
+        lead = self._title_lead(title)
+        if lead and lead in {self._title_lead(t) for t in recent[-self._LEAD_COOLDOWN:]}:
+            return f"lead word {lead!r} used within the last {self._LEAD_COOLDOWN} titles"
+        feeling = self._title_feeling(title)
+        if feeling and feeling in {self._title_feeling(t)
+                                   for t in recent[-self._FEELING_COOLDOWN:]}:
+            return f"feeling {feeling!r} used within the last {self._FEELING_COOLDOWN} titles"
         return ""
 
     async def _ensure_fresh_title(self, title: str, story_text: str) -> str:
@@ -386,19 +424,19 @@ class ScriptGenerator:
         remembered in data/title_history.json.
         """
         recent = self._load_title_history()
-        recent_norm = {self._norm_title(t) for t in recent}
 
-        problem = self._title_problem(title, recent_norm)
+        problem = self._title_problem(title, recent)
         if problem:
             logger.info(f"Title rejected ({problem}): {title!r} — regenerating")
             retry = await self.generate_title(story_text,
                                               avoid_titles=recent[-15:])
-            if retry and not self._title_problem(retry, recent_norm):
+            if retry and not self._title_problem(retry, recent):
                 title = retry
             elif NICHE.mech_title_leads:
                 # Mechanical guarantee: build a fresh formula title from the
-                # niche's lead/feeling word lists.
-                used = " ".join(recent_norm)
+                # niche's lead/feeling word lists (the lead/feeling cooldowns
+                # in _title_problem steer it away from recent repeats).
+                used = " ".join(self._norm_title(t) for t in recent)
                 feelings = [f for f in NICHE.mech_title_feelings
                             if f.lower() not in used] or list(NICHE.mech_title_feelings)
                 leads = list(NICHE.mech_title_leads)
@@ -410,7 +448,7 @@ class ScriptGenerator:
                         verb = "Are" if feel in ("Tired Of Waiting",
                                                  "Running On Empty") else "Feel"
                         candidate = f"{lead} For When You {verb} {feel}"
-                        if not self._title_problem(candidate, recent_norm):
+                        if not self._title_problem(candidate, recent):
                             logger.info(f"Title fixed mechanically: {candidate}")
                             title = candidate
                             done = True
