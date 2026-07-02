@@ -848,6 +848,19 @@ class ScriptGenerator:
                         # Belt-and-suspenders: drop any leaked <think>...</think>
                         text = re.sub(r"<think>.*?</think>", "", text,
                                       flags=re.DOTALL | re.IGNORECASE).strip()
+                        if not text:
+                            # Reasoning models (qwen3.5 etc.) can burn the whole
+                            # num_predict budget "thinking" and return HTTP 200
+                            # with an empty response — surface it instead of
+                            # failing silently. Fix: use a non-thinking model
+                            # (e.g. gemma4:31b) as LOCAL_MODEL_NAME.
+                            logger.warning(
+                                "Ollama returned 200 but an EMPTY response%s — "
+                                "if this is a reasoning model, its thinking may "
+                                "have consumed the token budget; use a "
+                                "non-thinking model as LOCAL_MODEL_NAME.",
+                                " (thinking present)" if data.get("thinking") else "")
+                            return None
                         return text
                     else:
                         body = (await resp.text())[:200]
