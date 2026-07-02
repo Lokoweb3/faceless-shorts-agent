@@ -211,6 +211,15 @@ class ScriptGenerator:
         prompt = self._build_prompt(content_item, template, language)
         variants = dict(self._last_variants)
 
+        # Hook freshness, part 1: steer the FIRST attempt away from recent
+        # opening lines (memory-using niches only).
+        recent_hooks = self._load_hook_history() if NICHE.uses_story_memory else []
+        if recent_hooks:
+            prompt += ("\n\nRECENT OPENING LINES — your opening line must NOT "
+                       "resemble any of these in imagery or wording; use a "
+                       "completely different image:\n- "
+                       + "\n- ".join(recent_hooks[-10:]))
+
         # Generate via AI
         ai_text = await self._call_ai(prompt)
 
@@ -231,6 +240,32 @@ class ScriptGenerator:
         # Parse into sections
         sections = self._parse_sections(ai_text, template)
 
+        # Hook freshness, part 2: if the opening line still echoes a recent
+        # one, regenerate ONCE with the offenders spelled out. If the retry
+        # is also stale, keep the better attempt and log it — a repeated
+        # hook is a quality wart, not a reason to skip the video.
+        if recent_hooks:
+            hook_line = self._extract_hook_line(sections, ai_text)
+            offenders = self._similar_hooks(hook_line, recent_hooks)
+            if offenders:
+                logger.info(f"Hook too similar to a recent opening — regenerating "
+                            f"once ({hook_line[:60]!r} ~ {offenders[0][:60]!r})")
+                retry_prompt = prompt + (
+                    "\n\nIMPORTANT: your previous opening was rejected for "
+                    "repeating recent imagery. It must NOT resemble:\n- "
+                    + "\n- ".join(offenders[:5])
+                    + "\nOpen with a COMPLETELY different image or scene.")
+                retry_text = await self._call_ai(retry_prompt)
+                if retry_text:
+                    retry_sections = self._parse_sections(retry_text, template)
+                    retry_hook = self._extract_hook_line(retry_sections, retry_text)
+                    if not self._similar_hooks(retry_hook, recent_hooks):
+                        sections = retry_sections
+                        ai_text = retry_text
+                    else:
+                        logger.warning("Retry hook still similar — keeping the "
+                                       "original script")
+
         # Extract hook and CTA
         hook = sections.get("hook", template.hook_template)
         cta = sections.get("call_to_action", template.cta_template)
@@ -238,6 +273,10 @@ class ScriptGenerator:
         # Build full text (skip empty sections so the narration has no
         # stray blank runs from unfilled template slots)
         full_text = "\n\n".join(s for s in sections.values() if s.strip())
+
+        # Remember the accepted opening line for future freshness checks.
+        if NICHE.uses_story_memory:
+            self._remember_hook(self._extract_hook_line(sections, full_text))
 
         script_data = {
             "full_text": full_text,
@@ -341,6 +380,70 @@ class ScriptGenerator:
             if re.search(pat, t):
                 return True
         return False
+
+    # ── Hook freshness ───────────────────────────────────────────────────
+    # The opening line is the description's first line AND the retention
+    # hook — and the model loves recycling imagery ("carrying the weight of
+    # the world" shipped three times). Recent hooks are remembered on disk;
+    # a new hook that shares too many content words with a recent one
+    # triggers one regeneration with the offenders spelled out.
+
+    _HOOK_HISTORY_FILE = DATA_DIR / "hook_history.json"
+    _HOOK_KEEP = 30
+    _HOOK_OVERLAP_THRESHOLD = 0.5
+
+    _HOOK_STOPWORDS = frozenset(
+        "the and for that this with have from they what when your just into "
+        "then there their about would could were been will them than over "
+        "some like you are not can its was his her had who all out one very "
+        "ever feel feels feeling felt remember today tonight day says said "
+        "has does most more".split())
+
+    def _load_hook_history(self) -> list:
+        return load_json(self._HOOK_HISTORY_FILE, [])
+
+    def _remember_hook(self, hook: str):
+        hook = (hook or "").strip()
+        if not hook:
+            return
+        hist = self._load_hook_history()
+        hist.append(hook)
+        try:
+            atomic_write_json(self._HOOK_HISTORY_FILE, hist[-self._HOOK_KEEP:])
+        except OSError:
+            pass
+
+    @staticmethod
+    def _extract_hook_line(sections: dict, full_text: str) -> str:
+        """The spoken opening line: first non-empty line of the hook section,
+        else the first sentence of the script."""
+        hook = (sections.get("hook") or "").strip()
+        if hook:
+            for line in hook.splitlines():
+                if line.strip():
+                    return line.strip()
+        first = re.split(r"(?<=[.!?])\s+", (full_text or "").strip())
+        return first[0].strip() if first else ""
+
+    @classmethod
+    def _hook_words(cls, s: str) -> set:
+        return {w for w in re.findall(r"[a-z']+", (s or "").lower())
+                if len(w) > 2 and w not in cls._HOOK_STOPWORDS}
+
+    def _similar_hooks(self, hook: str, recent: list) -> list:
+        """Recent hooks whose content words overlap `hook` beyond the
+        threshold (ratio against the smaller set, so short lines count)."""
+        hw = self._hook_words(hook)
+        if len(hw) < 3:
+            return []
+        out = []
+        for old in recent[-self._HOOK_KEEP:]:
+            ow = self._hook_words(old)
+            if not ow:
+                continue
+            if len(hw & ow) / max(1, min(len(hw), len(ow))) >= self._HOOK_OVERLAP_THRESHOLD:
+                out.append(old)
+        return out
 
     # ── Title freshness ──────────────────────────────────────────────────
     # The model sometimes ignores "don't use overwhelmed" and has no memory
