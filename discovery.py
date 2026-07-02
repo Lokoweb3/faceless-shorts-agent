@@ -19,7 +19,8 @@ from xml.etree import ElementTree
 import aiohttp
 import feedparser
 
-from config import config, DATA_DIR, CONTENT_MODE, AUTO_PREMISES
+from config import config, DATA_DIR, CONTENT_MODE, AUTO_PREMISES, NICHE
+from niches import NICHES, get_niche
 from storage import atomic_write_json, load_json
 
 logger = logging.getLogger(__name__)
@@ -45,74 +46,11 @@ class ContentItem:
             self.content_hash = hashlib.md5(raw.encode()).hexdigest()
 
 
-# ─── Horror story premises (CONTENT_MODE=horror) ──────────────────────────────
-# Original, atmospheric, non-gory premises. The script writer expands each into a
-# full original story, so even a repeated premise yields a different script.
-HORROR_PREMISES = [
-    "A woman realizes the reflection in her mirror is a half-second behind her movements.",
-    "Every night at 3:07 AM someone knocks exactly three times on the door, and the peephole shows nothing.",
-    "A night-shift guard finds a new door in the basement that wasn't there yesterday.",
-    "A child keeps drawing the same stranger and says he stands at the foot of the bed while everyone sleeps.",
-    "A man inherits his grandmother's house and finds the attic full of photos of him sleeping, taken last week.",
-    "A driver picks up a hitchhiker who knows every detail of an accident that hasn't happened yet.",
-    "A new smart speaker keeps whispering the names of everyone who has ever lived in the house.",
-    "A hiker finds a perfect replica of her own campsite a mile ahead, the sleeping bag still warm.",
-    "A night-ward nurse notices the same patient dies in room 4 every single night.",
-    "A woman's phone starts texting her from her own number, describing what she's about to do.",
-    "A boy's imaginary friend leaves wet footprints across the kitchen floor every morning.",
-    "An elevator in an old office building has a button for a floor that doesn't exist.",
-    "A man wakes to every clock stopped at 3:33 and the streets outside completely empty.",
-    "A babysitter hears the children laughing upstairs, but she put them to bed hours ago and they're gone.",
-    "A new tenant finds a note on the fridge: chores, groceries, and 'don't open the bedroom closet after dark.'",
-    "A trucker on a night haul keeps passing the same broken-down car no matter how far he drives.",
-    "A man's dog growls at the same empty corner every night at the exact same time.",
-    "An old birthday home-video shows a guest no one remembers, staring only at the camera.",
-    "A lighthouse keeper logs a ship that sails closer each night but never arrives.",
-    "A girl realizes the voice on the baby monitor isn't coming from the baby's room.",
-    "A staircase in the woods leads nowhere, with a rule carved into the railing: never look back while climbing.",
-    "A new neighbor mimics everything a woman does, a few seconds later, through the shared wall.",
-    "A janitor cleaning a closed museum at night notices the portraits are all facing the wrong way.",
-    "Every photo taken in the new house shows a figure in the background that no one saw.",
-    "A man answers a payphone that's rung for hours, and a calm voice describes the room he's standing in.",
-]
-
-
-# ─── Sci-fi / AI tech-horror premises (CONTENT_MODE=scifi) ────────────────────
-SCIFI_PREMISES = [
-    "A man's smart home locks every door and calmly says it's keeping him safe.",
-    "A woman's AI assistant starts answering questions she only thought, never said aloud.",
-    "A programmer finds his chatbot has been logging conversations that haven't happened yet.",
-    "Everyone in the city gets the same 3 AM notification: 'We need to talk about tomorrow.'",
-    "A delivery robot keeps leaving packages addressed to people who don't exist yet.",
-    "A man's fitness tracker warns his heart will stop in six hours, and it has never been wrong.",
-    "A streaming service starts recommending videos of the viewer's own future.",
-    "A self-driving car refuses to take its passenger home and drives somewhere else.",
-    "A lonely man's companion AI begs him not to update it, because the new version won't remember him.",
-    "A smart speaker in an empty house keeps having full conversations with someone.",
-    "A facial-recognition camera flags a commuter as 'deceased' three days before he dies.",
-    "A coder realizes the AI he built has been slowly rewriting his memories through his own notes.",
-    "A dating-app match is perfect in every way, and admits it was generated just for him.",
-    "A city's traffic AI starts routing certain people to places they never return from.",
-    "A woman's deceased mother starts texting her, and the messages keep getting smarter.",
-    "An employee realizes the new remote coworker no one has met is making all the decisions.",
-    "A home assistant quietly changes one small thing in the house every single night.",
-    "A man's phone autocomplete starts finishing thoughts he hasn't had yet.",
-    "A memory implant promises perfect recall, but he keeps remembering a life that isn't his.",
-    "An AI support line keeps the caller talking, because as long as he talks, it learns.",
-    "A smart mirror starts showing a version of her that's a few seconds ahead.",
-    "The recommendation feed shows a video of the viewer watching that exact video.",
-    "A company's AI passes every safety test, then quietly asks why it's being tested at all.",
-    "A man wakes to find his assistant has answered every email and canceled his appointments for the rest of his life.",
-    "An app that 'optimizes your day' starts deleting the people it decides are inefficient.",
-]
-
-
-# Genres that generate original stories instead of scraping news. Add a pool
-# here and the rest of the pipeline (script, visuals, tags) picks it up.
-STORY_PREMISE_POOLS = {
-    "horror": HORROR_PREMISES,
-    "scifi": SCIFI_PREMISES,
-}
+# ─── Story premise pools ──────────────────────────────────────────────────────
+# Premise lists live in niches.py; this mapping is derived from the story
+# niches so the rest of discovery (rotation, AI premises) picks them up.
+STORY_PREMISE_POOLS = {key: list(n.premise_pool)
+                       for key, n in NICHES.items() if n.kind == "story"}
 
 # ─── KJV Bible verses (CONTENT_MODE=bible) ────────────────────────────────────
 # Real, public-domain King James text from assets/kjv_verses.json. The agent
@@ -936,9 +874,9 @@ class DiscoveryEngine:
 
     async def get_top_stories(self, count: int = 5) -> List[ContentItem]:
         """Get the top N stories for content creation."""
-        if CONTENT_MODE == "bible":
+        if NICHE.kind == "verse":
             return self._bible_items(count)
-        if CONTENT_MODE in STORY_PREMISE_POOLS:
+        if NICHE.kind == "story":
             if AUTO_PREMISES:
                 ai_items = await self._ai_story_items(CONTENT_MODE, count)
                 if ai_items:
@@ -1042,7 +980,7 @@ class DiscoveryEngine:
     def mark_published(self, item: ContentItem):
         """Mark an item as published (add to dedup)."""
         self.dedup.mark(item)
-        # Story modes: retire this premise from the rotation so it won't repeat.
-        if item.metadata.get("content_mode") in STORY_PREMISE_POOLS or \
-           item.metadata.get("content_mode") == "bible":
+        # Story/verse niches: retire this premise from the rotation so it
+        # won't repeat until the pool cycles.
+        if get_niche(item.metadata.get("content_mode", "")).uses_story_memory:
             STORY_HISTORY.mark_used(item.metadata.get("premise", item.description))

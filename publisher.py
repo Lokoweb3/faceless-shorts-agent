@@ -17,7 +17,7 @@ from email.utils import parsedate_to_datetime
 
 import aiohttp
 
-from config import config, STATE_DIR, CONTENT_MODE, _get_env
+from config import config, STATE_DIR, CONTENT_MODE, NICHE, _get_env
 from storage import atomic_write_json, load_json
 
 logger = logging.getLogger(__name__)
@@ -754,47 +754,10 @@ class PublisherPipeline:
         Full publishing pipeline.
         Returns video_id on success, None on failure.
         """
-        # Build description with links (mode-aware)
-        if CONTENT_MODE == "scifi":
-            full_description = (
-                f"{description}\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🤖 {config.upload.channel_name}\n"
-                f"📺 New sci-fi stories every day!\n"
-                f"🔔 Subscribe for more near-future tales\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"#scifi #ai #technology #future #Shorts"
-            )
-        elif CONTENT_MODE == "horror":
-            full_description = (
-                f"{description}\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"👻 {config.upload.channel_name}\n"
-                f"📺 New scary stories every day!\n"
-                f"🔔 Subscribe if you dare\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"#scary #horror #creepy #scarystories #Shorts"
-            )
-        elif CONTENT_MODE == "bible":
-            full_description = (
-                f"{description}\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"✝️ {config.upload.channel_name}\n"
-                f"📖 Daily Bible verses & encouragement (KJV)\n"
-                f"🔔 Subscribe for a daily blessing\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"#Bible #BibleVerse #Faith #Jesus #God #KJV #Scripture #Christian #Shorts"
-            )
-        else:
-            full_description = (
-                f"{description}\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"⚽ {config.upload.channel_name}\n"
-                f"📺 New videos every day!\n"
-                f"🔔 Subscribe for more content\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"#Shorts"
-            )
+        # Build description with the niche's footer (branding + hashtags)
+        full_description = NICHE.description_footer.format(
+            description=description,
+            channel_name=config.upload.channel_name)
 
         # Build tags
         all_tags = list(set(config.upload.default_tags + tags))

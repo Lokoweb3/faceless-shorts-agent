@@ -15,51 +15,12 @@ from pathlib import Path
 
 import aiohttp
 
-from config import config, DATA_DIR, STATE_DIR, SCRIPTS_OUTPUT_DIR, _get_env, CONTENT_MODE
+from config import config, DATA_DIR, STATE_DIR, SCRIPTS_OUTPUT_DIR, _get_env, CONTENT_MODE, NICHE
+from niches import get_niche
 from storage import atomic_write_json, load_json
 
-# ── Variety engine: injected per-story so the AI can't settle into one rut ──
-_TECH_ANGLES = [
-    "a health wearable or medical implant", "AR / smart glasses", "a dating or matchmaking app",
-    "a translation earbud", "a self-driving car or navigation system", "an AI search or chat assistant",
-    "a sleep or fitness tracker", "a smart-city traffic or surveillance grid", "a customer-support AI",
-    "a voice-cloning or deepfake tool", "a scheduling / productivity assistant", "a home or delivery robot",
-    "a streaming recommendation feed", "a credit-scoring or insurance AI", "a 'digital afterlife' / memory backup service",
-    "a facial-recognition camera", "an autocomplete / writing assistant", "a child's companion toy",
-    "a workplace-monitoring algorithm", "a brain-interface or dream recorder", "a neighborhood doorbell network",
-    "a personal finance or trading bot", "a smart contact lens", "an elder-care monitoring system",
-]
-_ENDING_STYLES = [
-    "an ironic reversal where the narrator's attempt to stop it is exactly what completes it",
-    "a quiet, ambiguous final image that leaves the threat's intent unresolved",
-    "a realization that recolors the very first line (but NOT 'I'm not real / it was a simulation')",
-    "the threat calmly turning its attention to someone new — implicitly, the viewer",
-    "the narrator seeming to escape, then noticing the same wrongness is everywhere now",
-    "a mundane, eerily calm last beat instead of a violent one",
-    "the horror only implied — cut away the instant before it lands",
-    "a small human detail that becomes unbearable in hindsight",
-]
-
-# Bible-mode rotations (hoisted from the prompt builder so the analytics
-# feedback loop can weight them by real performance).
-_BIBLE_HOOK_STYLES = [
-    'a direct question (e.g. "Have you ever wondered if anyone really sees your struggle?")',
-    'a quiet observation (e.g. "There is a kind of tired that sleep cannot fix.")',
-    'a gentle second-person statement (e.g. "You have carried this longer than anyone knows.")',
-    'a small relatable scene (e.g. "It is late, the house is quiet, and your mind will not rest.")',
-    'a reassuring promise (e.g. "Before this day even began, you were already loved.")',
-    'a "when you..." line, used SPARINGLY (e.g. "When the weight feels like too much, hear this.")',
-]
-_BIBLE_CLOSINGS = [
-    '"Let this settle into your heart today."',
-    '"Hold onto this as you go."',
-    '"Breathe, and let Him carry the rest."',
-    '"Rest in that truth tonight."',
-    '"Take this with you into whatever comes next."',
-    '"Let it quiet your heart."',
-    '"You can rest in that."',
-    '"Walk gently today, knowing this."',
-]
+# All niche-specific content (prompts, premise pools, rotation variants,
+# tech angles) lives in niches.py — this module consumes the NICHE object.
 
 # ── Analytics feedback loop: performance-weighted variant selection ──────────
 # The nightly stats job (publisher.refresh_video_stats) aggregates real view
@@ -254,14 +215,13 @@ class ScriptGenerator:
         ai_text = await self._call_ai(prompt)
 
         if not ai_text:
-            # Story/devotional modes must NEVER publish the canned fallback:
-            # it's the same weak text every run (and for bible mode it would be
-            # a soccer-flavored template). Fail the item instead — the scheduler
-            # simply retries next cycle, so a provider outage costs time, not
-            # channel quality.
-            if CONTENT_MODE in ("scifi", "horror", "bible"):
+            # Story/devotional niches must NEVER publish the canned fallback:
+            # it's the same weak text every run. Fail the item instead — the
+            # scheduler simply retries next cycle, so a provider outage costs
+            # time, not channel quality.
+            if not NICHE.allow_template_fallback:
                 logger.error("AI generation failed — skipping this item "
-                             "(story modes never use the template fallback). "
+                             "(this niche never uses the template fallback). "
                              "Check your AI provider/key; the agent will retry "
                              "next cycle.")
                 return None
@@ -304,13 +264,13 @@ class ScriptGenerator:
             except Exception as e:
                 logger.warning(f"Scene prompt generation failed: {e}")
 
-        # SEO hook title for story modes (short, punchy, keyword-first)
-        if CONTENT_MODE in ("horror", "scifi", "bible"):
+        # SEO hook title (short, punchy, keyword-first) for niches that use it
+        if NICHE.uses_seo_title:
             try:
                 seo = await self.generate_title(full_text)
-                # Bible mode: enforce freshness against the recent-title
-                # history (dup/banned-word check + retry + mechanical fix).
-                if seo and CONTENT_MODE == "bible":
+                # Enforce freshness against the recent-title history
+                # (dup/banned-word check + retry + mechanical fix).
+                if seo and NICHE.enforce_title_freshness:
                     seo = await self._ensure_fresh_title(seo, full_text)
                 if seo:
                     script_data["seo_title"] = seo
@@ -330,64 +290,7 @@ class ScriptGenerator:
         Kept atmospheric/symbolic (no real names or faces) to avoid bad likenesses.
         Returns [] on failure so the caller falls back to generic scenes.
         """
-        if CONTENT_MODE == "scifi":
-            prompt = (
-                "You are an art director for a near-future sci-fi YouTube Short.\n"
-                f"Read this story and describe {n} cinematic, high-tech background images "
-                "that match its mood and beats, in order.\n\n"
-                f"STORY:\n{narration[:1200]}\n\n"
-                "RULES:\n"
-                f"- Output EXACTLY {n} lines, one image description per line.\n"
-                "- Each line is an atmospheric, futuristic, SYMBOLIC scene (glowing screens, "
-                "server rooms, empty smart homes, neon cityscapes, drones, holograms, dim labs).\n"
-                "- Cold, eerie, high-tech mood. NO faces, NO text or logos in the image.\n"
-                "- The FIRST line must visualize the story's OPENING SENTENCE — the exact anomaly or image it names — so the first frame matches the hook.\n"
-                "- No numbering, no commentary — just the lines."
-            )
-        elif CONTENT_MODE == "horror":
-            prompt = (
-                "You are an art director for a horror YouTube Short.\n"
-                f"Read this scary story and describe {n} dark, eerie background images "
-                "that match its mood and beats, in order.\n\n"
-                f"STORY:\n{narration[:1200]}\n\n"
-                "RULES:\n"
-                f"- Output EXACTLY {n} lines, one image description per line.\n"
-                "- Each line is an atmospheric, unsettling, SYMBOLIC scene (empty rooms, "
-                "long shadows, fog, moonlit windows, dim hallways, silhouettes, old objects).\n"
-                "- Creepy and suspenseful, NOT gory or graphic. No blood, no faces.\n"
-                "- The FIRST line must visualize the story's OPENING SENTENCE — the exact anomaly or image it names — so the first frame matches the hook.\n"
-                "- No text or logos in the image. No numbering, no commentary — just the lines."
-            )
-        elif CONTENT_MODE == "bible":
-            prompt = (
-                "You are an art director for a reverent Christian devotional YouTube Short.\n"
-                f"Read this devotional and describe {n} beautiful, peaceful background images "
-                "that match its mood and beats, in order.\n\n"
-                f"DEVOTIONAL:\n{narration[:1200]}\n\n"
-                "RULES:\n"
-                f"- Output EXACTLY {n} lines, one image description per line.\n"
-                "- Each line is a reverent, symbolic, NATURE/LANDSCAPE scene (sunrise over "
-                "mountains, golden light through clouds, calm seas, open fields, ancient "
-                "holy-land vistas, a single candle, light breaking through darkness, doves, paths).\n"
-                "- Warm, hopeful, majestic mood. NO people's faces, NO depictions of God or "
-                "Jesus, NO text or letters in the image.\n"
-                "- The FIRST line must visualize the devotional's OPENING LINE, so the first frame matches the hook.\n"
-                "- No numbering, no commentary — just the lines."
-            )
-        else:
-            prompt = (
-                "You are an art director for a cinematic YouTube Short.\n"
-                f"Read this narration and describe {n} cinematic background images that "
-                "visually match its flow, in order.\n\n"
-                f"NARRATION:\n{narration[:1200]}\n\n"
-                "RULES:\n"
-                f"- Output EXACTLY {n} lines, one image description per line.\n"
-                "- Each line is a vivid, atmospheric, SYMBOLIC scene (stadiums, the ball, "
-                "crowds, floodlights, silhouettes, weather, light, motion, emotion).\n"
-                "- NO real player names, NO recognizable faces, NO text or logos in the image.\n"
-                "- The FIRST line must visualize the narration's OPENING SENTENCE, so the first frame matches the hook.\n"
-                "- No numbering, no bullets, no extra commentary — just the lines."
-            )
+        prompt = NICHE.scene_prompt.format(n=n, narration=narration[:1200])
         out = await self._call_ai(prompt)
         if not out:
             return []
@@ -439,22 +342,15 @@ class ScriptGenerator:
                 return True
         return False
 
-    # ── Title freshness (bible mode) ─────────────────────────────────────
+    # ── Title freshness ──────────────────────────────────────────────────
     # The model sometimes ignores "don't use overwhelmed" and has no memory
     # of yesterday's titles — so freshness is enforced in CODE: recent titles
     # are remembered on disk, duplicates/banned words trigger a retry, and a
     # mechanical fallback guarantees a fresh title even if the retry repeats.
+    # The banned words and mechanical-formula word lists are niche data
+    # (NICHE.banned_title_words / mech_title_leads / mech_title_feelings).
 
-    TITLE_FEELINGS = [
-        "Anxious", "Afraid", "Weary", "Alone", "Stuck", "Discouraged",
-        "Forgotten", "Burned Out", "Heartbroken", "Unseen", "Not Enough",
-        "Tired Of Waiting", "Running On Empty", "Lost",
-        "Misunderstood", "Exhausted", "Broken", "Restless",
-    ]
-    TITLE_LEADS = ["Peace", "Hope", "Strength", "Comfort", "Grace", "Rest",
-                   "Light", "Joy", "Courage", "Healing", "Encouragement"]
     _TITLE_HISTORY_FILE = DATA_DIR / "title_history.json"
-    _BANNED_TITLE_WORDS = ("overwhelmed",)
 
     def _load_title_history(self) -> list:
         return load_json(self._TITLE_HISTORY_FILE, [])
@@ -475,7 +371,7 @@ class ScriptGenerator:
     def _title_problem(self, title: str, recent_norm: set) -> str:
         """Return why a title is unacceptable, or '' if it's fine."""
         low = title.lower()
-        if any(w in low for w in self._BANNED_TITLE_WORDS):
+        if any(w in low for w in NICHE.banned_title_words):
             return "banned word"
         if self._norm_title(title) in recent_norm:
             return "duplicate of a recent title"
@@ -499,12 +395,13 @@ class ScriptGenerator:
                                               avoid_titles=recent[-15:])
             if retry and not self._title_problem(retry, recent_norm):
                 title = retry
-            elif CONTENT_MODE == "bible":
-                # Mechanical guarantee: build a fresh bible-formula title.
+            elif NICHE.mech_title_leads:
+                # Mechanical guarantee: build a fresh formula title from the
+                # niche's lead/feeling word lists.
                 used = " ".join(recent_norm)
-                feelings = [f for f in self.TITLE_FEELINGS
-                            if f.lower() not in used] or list(self.TITLE_FEELINGS)
-                leads = list(self.TITLE_LEADS)
+                feelings = [f for f in NICHE.mech_title_feelings
+                            if f.lower() not in used] or list(NICHE.mech_title_feelings)
+                leads = list(NICHE.mech_title_leads)
                 random.shuffle(leads)
                 random.shuffle(feelings)
                 done = False
@@ -526,52 +423,21 @@ class ScriptGenerator:
 
     async def generate_title(self, story_text: str,
                              avoid_titles: Optional[list] = None) -> str:
-        """Generate a punchy, sub-60-char, keyword-first YouTube Shorts title."""
-        if CONTENT_MODE == "bible":
-            # (uses the module-level random import — see note in _build_prompt)
-            # Rotate the emotional angle so titles don't cluster on one feeling
-            # (analytics showed "overwhelmed" getting saturated). Pick a few to
-            # steer toward, and explicitly steer away from the overused one.
-            feelings = [
-                "anxious", "can't sleep", "afraid", "like giving up", "broke down",
-                "unseen", "weary", "like a failure", "lost your faith", "can't forgive",
-                "tired of waiting", "alone", "running on empty", "stuck", "discouraged",
-                "not enough", "forgotten", "burned out", "heartbroken", "hopeless",
-            ]
-            picks = random.sample(feelings, 4)
+        """Generate a punchy, sub-60-char, keyword-first YouTube Shorts title
+        from the niche's title prompt template."""
+        if not NICHE.title_prompt:
+            return ""
+        avoid_block = (("Do NOT reuse any of these recent titles (make something clearly "
+                        "different): " + "; ".join(avoid_titles) + "\n")
+                       if avoid_titles else "")
+        # {steer}: a rotating sample of the niche's steer feelings, so titles
+        # don't cluster on one emotion. Only filled when the niche defines it.
+        steer = ""
+        if NICHE.title_steer_feelings:
+            picks = random.sample(list(NICHE.title_steer_feelings), 4)
             steer = ", ".join(f"'{f}'" for f in picks)
-            prompt = (
-                "Write ONE warm, uplifting YouTube Shorts title for this Bible devotional.\n"
-                "BEST-PERFORMING FORMULA (strongly prefer this): name a feeling/emotion, then "
-                "'For When You...' plus a BROAD, universal struggle.\n"
-                "Proven structure: 'Peace For When You Are Tired Of Waiting', "
-                "'Strength For When You Feel Like Giving Up', 'Comfort For When You Feel Alone'.\n"
-                f"For THIS title, lean toward one of these feelings if it fits the verse: {steer}.\n"
-                "IMPORTANT: do NOT use the word 'overwhelmed' — it has been overused. "
-                "Choose a DIFFERENT, fresh feeling from the kind listed above.\n"
-                + (("Do NOT reuse any of these recent titles (make something clearly "
-                    "different): " + "; ".join(avoid_titles) + "\n")
-                   if avoid_titles else "")
-                + "Rules: under 52 characters, warm and relatable not preachy, Title Case, "
-                "NO hashtags, NO quotes, NO emojis, NO Bible reference in the title. Output only the title.\n\n"
-                "DEVOTIONAL:\n" + (story_text or "")[:800]
-            )
-        else:
-            prompt = (
-                "Write ONE YouTube Shorts title for this story.\n"
-                "STYLE THAT WORKS (do this): quiet, specific, strange — name the one small wrong "
-                "detail. Good examples: 'Smart Home Rearranges My Life By Millimeters', "
-                "'I Remember Dying Yesterday', 'My Speaker Knows I'm Not The Original', "
-                "'Why Does A Perfect AI Need A Kill Switch?'.\n"
-                "STYLE THAT FAILS (NEVER do this): loud, generic melodrama and shock words like "
-                "'screaming', 'dying', 'terror', 'deceased', 'wants you dead'. These make viewers scroll.\n"
-                + (("Do NOT reuse any of these recent titles (make something clearly "
-                    "different): " + "; ".join(avoid_titles) + "\n")
-                   if avoid_titles else "")
-                + "Rules: under 60 characters, the intriguing concept FIRST, curiosity over shock, "
-                "Title Case, NO hashtags, NO quotes, NO emojis. Output only the title.\n\n"
-                "STORY:\n" + (story_text or "")[:800]
-            )
+        prompt = NICHE.title_prompt.format(
+            steer=steer, avoid_block=avoid_block, story=(story_text or "")[:800])
         try:
             out = await self._call_ai(prompt)
             if out:
@@ -585,21 +451,18 @@ class ScriptGenerator:
     async def generate_premises(self, mode: str, n: int = 3, avoid: list = None) -> List[str]:
         """Generate brand-new, original story premises (infinite content), steering
         away from anything in `avoid` (recent summaries) so it never repeats."""
-        genre = {
-            "scifi": "near-future AI / technology horror (rogue AI, smart devices, "
-                     "surveillance, uncanny tech)",
-            "horror": "atmospheric supernatural / psychological horror (hauntings, "
-                      "uncanny events, dread) — creepy, never gory",
-        }.get(mode, "atmospheric horror")
+        niche = get_niche(mode)
+        genre = niche.premise_genre or "atmospheric horror"
         avoid_block = ""
         if avoid:
             avoid_block = ("\n\nDo NOT repeat or closely echo any of these already-used "
                            "ideas:\n- " + "\n- ".join(avoid[:25]))
-        # Variety engine: force each sci-fi premise onto a DIFFERENT technology
-        # so auto-generated premises can't cluster on smart-home/assistant plots.
+        # Variety engine: niches with tech_angles force each premise onto a
+        # DIFFERENT technology so premises can't cluster on one setting.
         tech_block = ""
-        if mode == "scifi":
-            angles = random.sample(_TECH_ANGLES, min(max(n, 1), len(_TECH_ANGLES)))
+        if niche.tech_angles:
+            angles = random.sample(list(niche.tech_angles),
+                                   min(max(n, 1), len(niche.tech_angles)))
             tech_block = ("\nBase each premise on a DIFFERENT one of these technologies "
                           "(one each, any order):\n- " + "\n- ".join(angles))
         prompt = (
@@ -625,7 +488,9 @@ class ScriptGenerator:
 
     def _build_prompt(self, content_item: Any, template: ScriptTemplate,
                       language: str) -> str:
-        """Build the AI prompt for script generation."""
+        """Build the AI prompt for script generation from the niche's
+        script_prompt template. The niche's rotation slots are filled with
+        performance-weighted variants and recorded on self._last_variants."""
         title = getattr(content_item, 'title', 'Untitled Story')
         description = getattr(content_item, 'description', '')
         source_urls = getattr(content_item, 'source_urls', [])
@@ -636,9 +501,22 @@ class ScriptGenerator:
         elif language == "pt":
             lang_instruction = "Write the script in Portuguese (Brazilian)."
 
-        # Past stories the channel has made — fed in so the AI avoids repeating ideas.
-        avoid_block = ""
-        if CONTENT_MODE in ("scifi", "horror"):
+        # Fill the niche's rotation slots (hook_style/closing/ending_style/...)
+        # with performance-weighted picks; record them for the analytics loop.
+        chosen = {kind: weighted_variant(kind, list(options))
+                  for kind, options in NICHE.rotations.items()}
+        self._last_variants = dict(chosen)
+
+        if NICHE.kind == "verse":
+            # Verse niches: title is the reference, description the exact text.
+            return NICHE.script_prompt.format(
+                verse_text=description, reference=title,
+                lang_instruction=lang_instruction, **chosen)
+
+        if NICHE.kind == "story":
+            # Past stories the channel has made — fed in so the AI avoids
+            # repeating ideas.
+            avoid_block = ""
             try:
                 from discovery import STORY_HISTORY
                 recents = STORY_HISTORY.recent_summaries(15)
@@ -647,140 +525,21 @@ class ScriptGenerator:
                                    "these story ideas:\n- " + "\n- ".join(recents))
             except Exception:
                 avoid_block = ""
+            channel_style = _get_env("CHANNEL_STYLE", NICHE.channel_style_default)
+            return NICHE.script_prompt.format(
+                channel_style=channel_style, title=title,
+                description=description[:400], avoid_block=avoid_block,
+                lang_instruction=lang_instruction, **chosen)
 
-        # ── Bible mode: real KJV verse + short reverent reflection ──
-        if CONTENT_MODE == "bible":
-            reference = title
-            verse_text = description
-            # NOTE: no local `import random` here — a local import makes
-            # `random` function-local for the WHOLE function, which crashed
-            # the scifi/horror branches below with UnboundLocalError.
-            # Rotate hook style + closing, weighted by real performance
-            # (see weighted_variant). The chosen variants are recorded on
-            # self so generate() can save them with the script.
-            hook_style = weighted_variant("hook_style", _BIBLE_HOOK_STYLES)
-            closing_ex = weighted_variant("closing", _BIBLE_CLOSINGS)
-            self._last_variants = {"hook_style": hook_style, "closing": closing_ex}
-            return f"""You are writing a short, uplifting Christian devotional for a YouTube Short (vertical, ~45 seconds). It pairs ONE real Bible verse with a warm, encouraging reflection.
-
-THE VERSE (King James Version) — use it EXACTLY as written, do not change a single word:
-"{verse_text}"
-Reference: {reference}
-
-RULES:
-- Open with ONE relatable line that hooks instantly. For THIS devotional, make the opening {hook_style}. Vary it — do NOT default to starting with "When you feel...".
-- Then present the verse, naturally, quoting it EXACTLY as given above. Do NOT alter, paraphrase, or invent any scripture.
-- Then 5-7 sentences of warm, encouraging reflection that EXPAND on the meaning: what this verse reveals about God's character, how it speaks to a real struggle someone might be facing today, and what it looks like to actually live it out. Go deeper than a single thought — unfold the verse gently and personally, as if speaking to one tired friend.
-- End with a gentle, uplifting takeaway. Vary the wording — do NOT use "Carry this peace with you today"; instead use something fresh like {closing_ex}.
-- Then close with ONE short, warm invitation to like and subscribe — kept gentle and on-tone, never salesy or shouty. Use a soft phrasing such as: "If this blessed you, tap like and subscribe for a verse like this every day." or "Like and subscribe to receive your daily manna." Keep it to a single sentence.
-- About 180-210 words total (about 60-75 seconds spoken). Calm, sincere, reverent, unhurried tone — never preachy or fire-and-brimstone.
-- Non-denominational and inclusive. Do NOT add doctrine, interpretation disputes, or anything political.
-- Output ONLY the spoken words — no stage directions, no emojis, no markdown, no labels.
-
-{lang_instruction}
-
-Write the complete devotional with clear section markers like [HOOK], [VERSE], [REFLECTION].
-"""
-
-        # ── Sci-fi / AI tech-horror mode: original near-future dread story ──
-        if CONTENT_MODE == "scifi":
-            channel_style = _get_env(
-                "CHANNEL_STYLE",
-                "Tense near-future sci-fi about technology and AI turning wrong. Grounded, "
-                "plausible, and unsettling — quiet dread rather than action.")
-            ending_style = weighted_variant("ending_style", _ENDING_STYLES)
-            self._last_variants = {"ending_style": ending_style}
-            return f"""You are a sharp science-fiction writer crafting an ORIGINAL near-future tech-horror story for a YouTube Short (vertical, ~60 seconds).
-
-CHANNEL STYLE: {channel_style}
-
-STORY PREMISE: {title}
-{description[:400]}
-{avoid_block}
-
-{lang_instruction}
-
-RULES:
-- Write a single original first-person story, present tense.
-- THE FIRST SENTENCE IS EVERYTHING. It must name a SPECIFIC, CONCRETE anomaly the reader can picture instantly — an exact object doing one exact wrong thing. Strong examples: "The safety audit finishes with a perfect score, but the screen doesn't turn green." / "My navigation app ignored my destination and whispered 'Recalculating for your safety,' then locked the doors." Weak (NEVER do this): vague openers like "Something was wrong with my phone" or "Technology can be scary."
-- Build unease as the device behaves in ways that feel plausible but deeply off. Use small, real, specific details.
-- About 100-130 words (about 45 seconds spoken) — tighter is better for retention. Short, punchy sentences.
-- Grounded and believable — near-future, not space opera. Unsettling, NOT gory.
-- ENDING FOR THIS STORY: land the twist as {ending_style}. Do NOT default to the narrator dying, being deleted, replaced, or "uploaded" — vary it.
-- LOOP (retention): write the FINAL line so it flows naturally back into the FIRST line — a viewer whose Short loops to the start should feel seamless, chilling continuity. Do NOT literally repeat the first line.
-- VARIETY (important): do NOT fall back on overused setups — avoid the smart-home-seals-you-inside plot, "optimization/your safety" gas or lockdowns, the "AI deletes/replaces/harvests the human" plot, and the twists "I'm not the real one / it's a simulation" or "I'm being deprecated/deleted." Invent a genuinely different threat and setting. Look at the ALREADY-MADE list and go somewhere new.
-- CONTENT SAFETY (mandatory): NO suicide, self-harm, or methods of self-harm; NO sexual content or sexual violence; NO minors in unsafe situations; NO graphic gore, torture, or real-world dangerous instructions. Keep it psychological and suspenseful — dread, not graphic harm.
-- Output ONLY the spoken story text — no stage directions, emojis, or notes.
-
-Write the complete story with clear section markers like [HOOK], [BUILD], [TWIST].
-"""
-
-        # ── Horror mode: write an original scary story from the premise ──
-        if CONTENT_MODE == "horror":
-            channel_style = _get_env(
-                "CHANNEL_STYLE",
-                "Tense, atmospheric horror that hooks in the first line and ends on a "
-                "chilling twist. Creepy and suspenseful, never gory.")
-            ending_style = weighted_variant("ending_style", _ENDING_STYLES)
-            self._last_variants = {"ending_style": ending_style}
-            return f"""You are a master horror storyteller writing an ORIGINAL scary story for a YouTube Short (vertical, ~60 seconds).
-
-CHANNEL STYLE: {channel_style}
-
-STORY PREMISE: {title}
-{description[:400]}
-{avoid_block}
-
-{lang_instruction}
-
-RULES:
-- Write a single original first-person scary story, present tense.
-- THE FIRST SENTENCE IS EVERYTHING. It must name a SPECIFIC, CONCRETE wrong detail the reader can picture instantly — not a vague mood. Weak openers like "Something felt off" are forbidden; open on the exact unsettling thing.
-- Build tension steadily with small, vivid sensory details.
-- About 100-130 words (about 45 seconds spoken) — tighter is better for retention. Short, punchy sentences.
-- Creepy and suspenseful, NOT graphic or gory. No extreme violence.
-- ENDING FOR THIS STORY: land the twist as {ending_style}. Vary it — do not end the same way every time.
-- LOOP (retention): write the FINAL line so it flows naturally back into the FIRST line — a viewer whose Short loops to the start should feel seamless, chilling continuity. Do NOT literally repeat the first line.
-- CONTENT SAFETY (mandatory): NO suicide, self-harm, or methods of self-harm; NO sexual content or sexual violence; NO minors in unsafe situations; NO graphic gore, torture, or real-world dangerous instructions. Keep it psychological and suspenseful — dread, not graphic harm.
-- Output ONLY the spoken story text — no stage directions, emojis, or notes.
-
-Write the complete story with clear section markers like [HOOK], [BUILD], [TWIST].
-"""
-
-        # ── Default (soccer / news) mode ──
-        channel_style = _get_env(
-            "CHANNEL_STYLE",
-            "Punchy, high-energy soccer storytelling that hooks instantly and "
-            "keeps a consistent, recognizable voice across every video."
-        )
-
-        prompt = f"""You are a professional soccer content creator writing scripts for YouTube Shorts (60 seconds max, vertical video).
-
-CHANNEL STYLE: {channel_style}
-
-CONTENT TOPIC: {title}
-DESCRIPTION: {description[:500]}
-SOURCES: {', '.join(source_urls[:3])}
-
-{lang_instruction}
-
-Write a {template.name} style script following this structure:
-{', '.join(template.structure)}
-
-RULES:
-- About 45 seconds when spoken (about 100-130 words) — tighter retains better
-- First 3 seconds MUST be a powerful hook that grabs attention and creates an open loop
-- Stay true to the CHANNEL STYLE above so every video feels consistent
-- Use dramatic, energetic language and short, punchy sentences
-- Include specific facts, dates, and numbers
-- Keep the viewer watching to the end (build curiosity, pay it off late)
-- End with a natural call to action to follow/subscribe
-- Use soccer terminology naturally; make it emotional and engaging
-- Output ONLY the spoken script lines — no stage directions, emojis, or notes
-
-Write the complete script with clear section markers like [HOOK], [SETUP], etc.
-"""
-        return prompt
+        # News niches (soccer): topic + sources + category template structure.
+        channel_style = _get_env("CHANNEL_STYLE", NICHE.channel_style_default)
+        return NICHE.script_prompt.format(
+            channel_style=channel_style, title=title,
+            description=description[:500],
+            sources=", ".join(source_urls[:3]),
+            lang_instruction=lang_instruction,
+            template_name=template.name,
+            structure=", ".join(template.structure), **chosen)
 
     async def _call_ai(self, prompt: str) -> Optional[str]:
         """Call AI model (Grok, OpenAI, Anthropic, or local)."""

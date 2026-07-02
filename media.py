@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 from config import (config, DATA_DIR, VIDEO_OUTPUT_DIR, THUMBNAIL_OUTPUT_DIR,
-                    AUDIO_OUTPUT_DIR, CONTENT_MODE, _get_env)
+                    AUDIO_OUTPUT_DIR, CONTENT_MODE, NICHE, _get_env)
 
 logger = logging.getLogger(__name__)
 
@@ -1080,50 +1080,9 @@ class MediaPipeline:
     def _search_terms(category: str, title: str) -> List[str]:
         """Build scene phrases for the visuals (generic/atmospheric, never match clips)."""
         if config.video.asset_provider == "ai_image":
-            if CONTENT_MODE == "scifi":
-                return [
-                    "a dark server room with rows of glowing blue lights, cold atmosphere",
-                    "an empty smart home at night, screens glowing softly in the dark",
-                    "a neon-lit futuristic city skyline at night, rain, cinematic",
-                    "a single glowing computer screen in a dim room, eerie",
-                    "a humanoid robot silhouette in a dark lab, backlit",
-                    "a holographic interface floating in an empty room, blue light",
-                    "a self-driving car on an empty highway at night, headlights glowing",
-                    "a wall of security monitors glowing in a dark control room",
-                ]
-            if CONTENT_MODE == "horror":
-                return [
-                    "a dark empty hallway lit by a single flickering bulb, long shadows",
-                    "a moonlit window with a faint silhouette behind the curtain",
-                    "an abandoned room with an old chair, dust and fog, dim light",
-                    "a foggy street at night, lone streetlamp, no people",
-                    "a staircase descending into darkness, eerie atmosphere",
-                    "an old mirror reflecting an empty room, cold blue light",
-                    "a child's bedroom at night, toys in shadow, unsettling stillness",
-                    "a forest at night, bare trees, mist, faint distant light",
-                ]
-            if CONTENT_MODE == "bible":
-                return [
-                    "golden sunrise over distant mountains, rays of light through clouds, peaceful",
-                    "a calm sea at dawn, warm light on gentle waves, serene and majestic",
-                    "light breaking through dark storm clouds, hopeful, cinematic",
-                    "an open green field at golden hour, soft warm light, tranquil",
-                    "a single lit candle glowing in soft darkness, warm and reverent",
-                    "an ancient stone path winding through the holy land at sunrise",
-                    "a quiet mountaintop above the clouds bathed in golden light",
-                    "sunbeams streaming through a forest canopy onto a peaceful path",
-                ]
-            # Cinematic, symbolic scenes — no real players (avoids bad faces / likeness).
-            return [
-                "a packed football stadium at night under blazing floodlights, fans roaring",
-                "a lone soccer player silhouette on the pitch, dramatic backlight, fog",
-                "extreme close-up of a soccer ball on dewy grass at golden hour",
-                "a huge crowd of football fans celebrating, confetti and flares, energy",
-                "a glowing golden trophy on a pedestal, spotlight, dark arena",
-                "sweeping cinematic aerial of a floodlit football pitch under stormy skies",
-                "a goal net rippling as a ball strikes it, dramatic frozen moment",
-                "a stadium tunnel with bright light at the end, atmospheric haze",
-            ]
+            # Mode-tuned symbolic scenes come from the active niche
+            # (no real names/faces — avoids bad likenesses).
+            return list(NICHE.fallback_scenes)
         base = ["soccer stadium night", "football on grass close up",
                 "stadium crowd cheering", "football pitch aerial",
                 "golden trophy lights", "soccer ball slow motion"]

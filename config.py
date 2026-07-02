@@ -63,60 +63,36 @@ def _get_env(key: str, default: str = "") -> str:
 # Content domain: "soccer" (news-driven) or "horror"/"scifi" (original stories).
 CONTENT_MODE = _get_env("CONTENT_MODE", "soccer").strip().lower()
 
+# The active niche: ALL mode-specific prompts/styles/tags/behavior live in
+# niches.py — the rest of the codebase consumes this object instead of
+# branching on CONTENT_MODE.
+from niches import get_niche, NICHES  # noqa: E402 (needs _get_env above)
+NICHE = get_niche(CONTENT_MODE)
+
 # When true, story modes generate brand-new AI premises every run (infinite,
 # never-repeating) instead of drawing from the built-in fixed pool.
 AUTO_PREMISES = _get_env("AUTO_PREMISES", "false").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _default_image_style() -> str:
-    """Default AI-image art style, tuned to the content mode."""
-    if CONTENT_MODE == "horror":
-        return ("dark eerie cinematic horror illustration, ominous atmosphere, "
-                "deep shadows, fog, moonlight, unsettling mood, film grain, "
-                "no text, no watermark, no gore")
-    if CONTENT_MODE == "scifi":
-        return ("cinematic sci-fi concept art, futuristic, neon glow, cold blue and teal "
-                "light, high-tech, cyberpunk, volumetric light, moody atmosphere, "
-                "highly detailed, no text, no watermark")
-    if CONTENT_MODE == "bible":
-        return ("reverent cinematic biblical art, warm golden light, divine rays, "
-                "ancient holy land landscapes, sunrise, dramatic skies, oil-painting "
-                "and renaissance style, peaceful and majestic, highly detailed, "
-                "no text, no watermark, no lettering")
-    return ("cinematic dramatic digital illustration, highly detailed, epic lighting, "
-            "moody atmosphere, vibrant colors, no text, no watermark, no lettering")
+    """Default AI-image art style, from the active niche."""
+    return NICHE.image_style
 
 
 def _default_tags() -> list:
-    """Default upload tags, tuned to the content mode.
+    """Default upload tags, from the active niche.
 
     These previously were soccer tags regardless of mode, so bible/horror
     videos were uploaded tagged "fifa, world cup..." — which tells YouTube's
     classifier exactly the wrong thing about the video.
     """
-    if CONTENT_MODE == "horror":
-        return ["horror", "scary stories", "horror story", "creepy",
-                "scary", "creepypasta", "shorts"]
-    if CONTENT_MODE == "scifi":
-        return ["scifi", "science fiction", "ai", "technology",
-                "tech horror", "future", "shorts"]
-    if CONTENT_MODE == "bible":
-        return ["bible", "bible verse", "scripture", "faith", "jesus",
-                "kjv", "christian", "daily devotional", "shorts"]
-    return ["soccer", "football", "world cup", "fifa", "highlights",
-            "goals", "legendary", "shorts", "soccershorts"]
+    return list(NICHE.default_tags)
 
 
 def _default_category_id() -> str:
-    """YouTube categoryId per mode: 17=Sports, 24=Entertainment, 22=People & Blogs.
-
-    Previously every mode uploaded as Sports (the uploader's hardcoded default).
-    """
-    if CONTENT_MODE in ("horror", "scifi"):
-        return "24"
-    if CONTENT_MODE == "bible":
-        return "22"
-    return "17"
+    """YouTube categoryId from the active niche (17=Sports, 24=Entertainment,
+    22=People & Blogs). Previously every mode uploaded as Sports."""
+    return NICHE.youtube_category_id
 
 
 # ─── API Configuration ────────────────────────────────────────────────────────

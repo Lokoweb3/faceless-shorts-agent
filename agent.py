@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from config import config, BASE_DIR, STATE_DIR, LOG_DIR, CONTENT_MODE, _get_env
+from config import config, BASE_DIR, STATE_DIR, LOG_DIR, CONTENT_MODE, NICHE, _get_env
 from storage import atomic_write_json, load_json, InstanceLock
 from discovery import DiscoveryEngine, ContentItem, STORY_HISTORY, STORY_PREMISE_POOLS
 from script import ScriptGenerator
@@ -182,7 +182,7 @@ class ContentPipeline:
         # Fail-safe (story modes): if this script is too similar to a recent one,
         # regenerate once. Then summarize it and record it in the channel's story
         # memory (ledger + fingerprint) so future stories don't repeat it.
-        if CONTENT_MODE in STORY_PREMISE_POOLS or CONTENT_MODE == "bible":
+        if NICHE.uses_story_memory:
             full_text = script_data.get("full_text", "")
             # Content-safety gate: regenerate once if unsafe; SKIP entirely (no upload)
             # if it's still unsafe. This is what makes unattended public posting safe.
@@ -366,7 +366,7 @@ class ContentPipeline:
         hook = (sections.get("hook") or script_data.get("hook") or "").strip()
         full_text = (script_data.get("full_text") or item.description or "").strip()
 
-        if CONTENT_MODE == "bible":
+        if NICHE.kind == "verse":
             verse = (sections.get("verse") or "").strip()
             parts = [p for p in (hook, verse) if p]
             desc = "\n\n".join(parts) if parts else full_text
@@ -387,21 +387,21 @@ class ContentPipeline:
 
     def _build_youtube_title(self, item: ContentItem, script_data: dict) -> str:
         """Build an optimized YouTube title."""
-        # Story modes: use the generated punchy SEO title when available.
-        if CONTENT_MODE in ("horror", "scifi", "bible"):
+        # Niches with generated SEO titles use them directly.
+        if NICHE.uses_seo_title:
             base = script_data.get("seo_title", "").strip() or item.title
             suffix = " #Shorts"
             if len(base) + len(suffix) <= 100 and "#shorts" not in base.lower():
                 base = f"{base}{suffix}"
             return base[:100]
 
-        # Default (soccer) behavior
+        # News-niche behavior: hook prefix + the niche's title suffix.
         hook = script_data.get("hook", "")
         title = item.title
         if hook and len(hook) < 50:
             title = f"{hook} | {title}"
         if len(title) < 80:
-            title = f"{title} ⚽ #Shorts"
+            title = f"{title}{NICHE.news_title_suffix}"
         return title[:100]
 
     def _build_tags(self, item: ContentItem, script_data: dict) -> List[str]:
