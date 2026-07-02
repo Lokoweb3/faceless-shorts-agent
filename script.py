@@ -15,7 +15,8 @@ from pathlib import Path
 
 import aiohttp
 
-from config import config, SCRIPTS_OUTPUT_DIR, _get_env, CONTENT_MODE
+from config import config, DATA_DIR, SCRIPTS_OUTPUT_DIR, _get_env, CONTENT_MODE
+from storage import atomic_write_json, load_json
 
 # ── Variety engine: injected per-story so the AI can't settle into one rut ──
 _TECH_ANGLES = [
@@ -242,6 +243,10 @@ class ScriptGenerator:
         if CONTENT_MODE in ("horror", "scifi", "bible"):
             try:
                 seo = await self.generate_title(full_text)
+                # Bible mode: enforce freshness against the recent-title
+                # history (dup/banned-word check + retry + mechanical fix).
+                if seo and CONTENT_MODE == "bible":
+                    seo = await self._ensure_fresh_title(seo, full_text)
                 if seo:
                     script_data["seo_title"] = seo
                     logger.info(f"SEO title: {seo}")
@@ -365,7 +370,93 @@ class ScriptGenerator:
                 return True
         return False
 
-    async def generate_title(self, story_text: str) -> str:
+    # ── Title freshness (bible mode) ─────────────────────────────────────
+    # The model sometimes ignores "don't use overwhelmed" and has no memory
+    # of yesterday's titles — so freshness is enforced in CODE: recent titles
+    # are remembered on disk, duplicates/banned words trigger a retry, and a
+    # mechanical fallback guarantees a fresh title even if the retry repeats.
+
+    TITLE_FEELINGS = [
+        "Anxious", "Afraid", "Weary", "Alone", "Stuck", "Discouraged",
+        "Forgotten", "Burned Out", "Heartbroken", "Unseen", "Not Enough",
+        "Tired Of Waiting", "Running On Empty", "Lost",
+        "Misunderstood", "Exhausted", "Broken", "Restless",
+    ]
+    TITLE_LEADS = ["Peace", "Hope", "Strength", "Comfort", "Grace", "Rest",
+                   "Light", "Joy", "Courage", "Healing", "Encouragement"]
+    _TITLE_HISTORY_FILE = DATA_DIR / "title_history.json"
+    _BANNED_TITLE_WORDS = ("overwhelmed",)
+
+    def _load_title_history(self) -> list:
+        return load_json(self._TITLE_HISTORY_FILE, [])
+
+    def _remember_title(self, title: str):
+        hist = self._load_title_history()
+        hist.append(title)
+        try:
+            atomic_write_json(self._TITLE_HISTORY_FILE, hist[-40:])
+        except OSError:
+            pass
+
+    @staticmethod
+    def _norm_title(t: str) -> str:
+        t = t.lower().replace("#shorts", "")
+        return re.sub(r"[^a-z0-9 ]", "", t).strip()
+
+    def _title_problem(self, title: str, recent_norm: set) -> str:
+        """Return why a title is unacceptable, or '' if it's fine."""
+        low = title.lower()
+        if any(w in low for w in self._BANNED_TITLE_WORDS):
+            return "banned word"
+        if self._norm_title(title) in recent_norm:
+            return "duplicate of a recent title"
+        return ""
+
+    async def _ensure_fresh_title(self, title: str, story_text: str) -> str:
+        """Enforce title freshness in CODE, not just in the prompt.
+
+        Checks against the recent-title history; retries once with the
+        avoid-list spelled out; finally builds a fresh title mechanically
+        (bible-formula) so a repeat can never ship. The accepted title is
+        remembered in data/title_history.json.
+        """
+        recent = self._load_title_history()
+        recent_norm = {self._norm_title(t) for t in recent}
+
+        problem = self._title_problem(title, recent_norm)
+        if problem:
+            logger.info(f"Title rejected ({problem}): {title!r} — regenerating")
+            retry = await self.generate_title(story_text,
+                                              avoid_titles=recent[-15:])
+            if retry and not self._title_problem(retry, recent_norm):
+                title = retry
+            elif CONTENT_MODE == "bible":
+                # Mechanical guarantee: build a fresh bible-formula title.
+                used = " ".join(recent_norm)
+                feelings = [f for f in self.TITLE_FEELINGS
+                            if f.lower() not in used] or list(self.TITLE_FEELINGS)
+                leads = list(self.TITLE_LEADS)
+                random.shuffle(leads)
+                random.shuffle(feelings)
+                done = False
+                for lead in leads:
+                    for feel in feelings:
+                        verb = "Are" if feel in ("Tired Of Waiting",
+                                                 "Running On Empty") else "Feel"
+                        candidate = f"{lead} For When You {verb} {feel}"
+                        if not self._title_problem(candidate, recent_norm):
+                            logger.info(f"Title fixed mechanically: {candidate}")
+                            title = candidate
+                            done = True
+                            break
+                    if done:
+                        break
+
+        self._remember_title(title)
+        return title
+
+    async def generate_title(self, story_text: str,
+                             avoid_titles: Optional[list] = None) -> str:
         """Generate a punchy, sub-60-char, keyword-first YouTube Shorts title."""
         if CONTENT_MODE == "bible":
             # (uses the module-level random import — see note in _build_prompt)
@@ -389,7 +480,10 @@ class ScriptGenerator:
                 f"For THIS title, lean toward one of these feelings if it fits the verse: {steer}.\n"
                 "IMPORTANT: do NOT use the word 'overwhelmed' — it has been overused. "
                 "Choose a DIFFERENT, fresh feeling from the kind listed above.\n"
-                "Rules: under 52 characters, warm and relatable not preachy, Title Case, "
+                + (("Do NOT reuse any of these recent titles (make something clearly "
+                    "different): " + "; ".join(avoid_titles) + "\n")
+                   if avoid_titles else "")
+                + "Rules: under 52 characters, warm and relatable not preachy, Title Case, "
                 "NO hashtags, NO quotes, NO emojis, NO Bible reference in the title. Output only the title.\n\n"
                 "DEVOTIONAL:\n" + (story_text or "")[:800]
             )
@@ -402,7 +496,10 @@ class ScriptGenerator:
                 "'Why Does A Perfect AI Need A Kill Switch?'.\n"
                 "STYLE THAT FAILS (NEVER do this): loud, generic melodrama and shock words like "
                 "'screaming', 'dying', 'terror', 'deceased', 'wants you dead'. These make viewers scroll.\n"
-                "Rules: under 60 characters, the intriguing concept FIRST, curiosity over shock, "
+                + (("Do NOT reuse any of these recent titles (make something clearly "
+                    "different): " + "; ".join(avoid_titles) + "\n")
+                   if avoid_titles else "")
+                + "Rules: under 60 characters, the intriguing concept FIRST, curiosity over shock, "
                 "Title Case, NO hashtags, NO quotes, NO emojis. Output only the title.\n\n"
                 "STORY:\n" + (story_text or "")[:800]
             )

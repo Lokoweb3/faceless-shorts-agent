@@ -112,7 +112,33 @@ class YouTubeOAuth:
         self.refresh_token = config.api.youtube_refresh_token
         self.access_token = None
         self.token_expires = 0
+        # True once the refresh token is known-dead (invalid_grant) — a fatal
+        # state that needs re-authorization, unlike a transient network error.
+        self.auth_dead = False
         self._load_token()
+
+    def _write_health(self, state: str, detail: str = ""):
+        """Persist channel auth health so the Channel Control dashboard can
+        surface it (state/channel_health.json)."""
+        try:
+            atomic_write_json(STATE_DIR / "channel_health.json",
+                              {"auth": state, "detail": detail, "at": time.time()})
+        except OSError:
+            pass
+
+    async def verify(self) -> bool:
+        """Pre-flight credential check. Cheap: one token refresh, no upload.
+
+        Returns True if we can obtain an access token; records the result in
+        channel_health.json either way. On invalid_grant, auth_dead is set so
+        callers can distinguish 'fix your token' from 'retry later'.
+        """
+        self.auth_dead = False
+        token = await self.get_access_token()
+        if token:
+            self._write_health("ok")
+            return True
+        return False
 
     def _load_token(self):
         """Load cached token from disk."""
@@ -158,6 +184,13 @@ class YouTubeOAuth:
                     else:
                         error_text = await resp.text()
                         if "invalid_grant" in error_text:
+                            self.auth_dead = True
+                            self._write_health(
+                                "auth_dead",
+                                "Refresh token expired or revoked. Run "
+                                "python3 setup_oauth.py to re-authorize. If this "
+                                "keeps happening, publish your OAuth app to "
+                                "Production (Testing-mode tokens expire after 7 days).")
                             logger.error(
                                 "YouTube refresh token is expired or revoked "
                                 "(invalid_grant). Most common cause: the OAuth "
@@ -613,6 +646,16 @@ class PublisherPipeline:
     def upload_paused_until(self) -> Optional[datetime]:
         """UTC datetime uploads are quota-paused until, or None."""
         return QuotaGuard.paused_until()
+
+    async def verify_credentials(self) -> bool:
+        """Cheap pre-flight: can we get an access token? (No upload happens.)
+        Also records auth health for the Channel Control dashboard."""
+        return await self.uploader.oauth.verify()
+
+    @property
+    def auth_dead(self) -> bool:
+        """True when the refresh token is known-dead (needs re-authorization)."""
+        return getattr(self.uploader.oauth, "auth_dead", False)
 
     async def publish(self, video_path: Path, thumbnail_path: Optional[Path],
                       title: str, description: str, tags: List[str],

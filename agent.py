@@ -481,13 +481,18 @@ class Scheduler:
             return
 
         # 0b. Auth pre-flight: verify we can get an upload token BEFORE
-        #     spending work on generation. (Dry runs don't need auth.)
+        #     spending work on generation. Records health for the dashboard.
+        #     (Dry runs don't need auth.)
         if not config.scheduler.dry_run:
-            token = await self.pipeline.publisher.uploader.oauth.get_access_token()
-            if not token:
-                logger.error("YouTube auth unavailable — skipping generation this cycle. "
-                             "Fix credentials (python3 setup_oauth.py) and the agent "
-                             "will resume automatically.")
+            if not await self.pipeline.publisher.verify_credentials():
+                if self.pipeline.publisher.auth_dead:
+                    logger.error("HALTED: YouTube refresh token is dead (invalid_grant). "
+                                 "Run  python3 setup_oauth.py  to re-authorize; the "
+                                 "agent will resume automatically.")
+                else:
+                    logger.error("YouTube auth unavailable (network or credentials "
+                                 "issue) — skipping generation this cycle; will "
+                                 "retry next cycle.")
                 return
 
         # 1. Check if we can publish today
@@ -582,8 +587,7 @@ class SoccerContentAgent:
                 logger.warning(f"Uploads are quota-paused until {paused.isoformat()} — "
                                "not generating. Finished videos will retry automatically.")
                 return None
-            token = await self.pipeline.publisher.uploader.oauth.get_access_token()
-            if not token:
+            if not await self.pipeline.publisher.verify_credentials():
                 logger.error("YouTube auth unavailable — fix credentials first "
                              "(python3 setup_oauth.py).")
                 return None

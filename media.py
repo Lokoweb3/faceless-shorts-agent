@@ -77,9 +77,17 @@ def _run_ffmpeg(cmd: List[str], timeout: int = 300) -> Tuple[bool, str]:
 
 
 def _redact(text) -> str:
-    """Mask secret query params (e.g. Pollinations `&key=...`) before logging."""
-    import re
-    return re.sub(r'([?&](?:key|api_key|token)=)[^&\s]+', r'\1***', str(text))
+    """Strip API keys / tokens from any string before it reaches the logs.
+
+    aiohttp exceptions embed the full request URL, which can include
+    `key=sk_...` query parameters. Users paste logs into GitHub issues,
+    so never let a credential survive into a log line.
+    """
+    s = str(text)
+    s = re.sub(r'([?&](?:api_?key|key|token|access_token|auth)=)[^&\s\'"]+',
+               r'\1REDACTED', s, flags=re.IGNORECASE)
+    s = re.sub(r'\b(sk_|el_|1//)[A-Za-z0-9_\-\.]{8,}', r'\1REDACTED', s)
+    return s
 
 
 async def _fetch_url(session, url, **kwargs):
@@ -185,7 +193,7 @@ class StockAssetFetcher:
                                           timeout=aiohttp.ClientTimeout(total=120))
                 raw.write_bytes(content)
         except Exception as e:
-            logger.error(f"Pexels fetch error: {e}")
+            logger.error(f"Pexels fetch error: {_redact(e)}")
             return None
 
         # trim to the requested length (no audio)
