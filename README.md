@@ -83,6 +83,17 @@ channel's real history.
 
 ## Install
 
+**The whole path, zero → first video (~25 min, most of it Google's OAuth):**
+
+1. Install ffmpeg + Python deps, `cp .env.example .env` *(below)*
+2. `python3 setup_oauth.py` — guided YouTube authorization, writes keys to `.env`
+3. Get a free AI key ([ollama.com/settings/keys](https://ollama.com/settings/keys)) → put in `.env`
+4. Pick your niche: `CONTENT_MODE=` + optionally `CHANNEL_STYLE=` *(see "Choosing your content")*
+5. `python3 doctor.py` — 23 checks; fix anything it flags
+6. `python3 agent.py --once --dry-run` — builds a full video, uploads nothing; watch it
+7. Happy? `python3 agent.py --once` with `UPLOAD_PRIVACY=private`, check it in YouTube Studio
+8. Flip to `public`, start autopilot: `nohup python3 agent.py > agent.log 2>&1 &`
+
 ```bash
 # clone your copy
 git clone <your-repo-url>
@@ -169,6 +180,45 @@ Every option is documented inline in `.env.example`.
 
 ---
 
+## Choosing your content (you are NOT limited to the built-ins)
+
+`CONTENT_MODE` picks one of four **built-in niches** — but each is a starting
+point, not a cage. From least to most effort:
+
+**1. Pick a built-in mode:**
+
+| Mode | What it makes | Content source |
+|---|---|---|
+| `bible` | KJV verse + warm devotional reflection | 495 real verses, rotated |
+| `scifi` | original near-future AI/tech-dread stories | 25 premises (or infinite, see below) |
+| `horror` | original atmospheric scary stories | 25 premises (or infinite) |
+| `soccer` | news-driven football Shorts | Reddit / RSS / NewsAPI / Wikipedia |
+
+**2. Reshape a mode with `CHANNEL_STYLE`** — one line in `.env` changes the
+whole voice without touching code:
+
+```
+# same scifi mode, three very different channels:
+CHANNEL_STYLE=Found-footage style corporate AI incidents, told as leaked internal memos
+CHANNEL_STYLE=Cozy-creepy small-town stories where the technology is 20 years old
+CHANNEL_STYLE=Hard-SF near-future medicine gone subtly wrong, clinical narrator
+```
+
+**3. Never repeat with `AUTO_PREMISES=true`** (scifi/horror) — instead of the
+built-in 25-premise pool, the AI invents brand-new premises every run,
+steering away from everything the channel has already made.
+
+**4. Edit the pools directly** — all content lists live in `niches.py`
+(`HORROR_PREMISES`, `SCIFI_PREMISES`, ending/hook styles) and
+`assets/kjv_verses.json` (add/remove verses; the title-mismatch fix for a
+verse that doesn't suit a warm devotional is deleting it here).
+
+**5. Build a completely new niche** — see the next section. Motivation quotes,
+stoic wisdom, history facts, sleep stories, true-crime-lite: anything that fits
+"short narration + atmospheric images" is one file entry away.
+
+---
+
 ## Run
 
 ```bash
@@ -211,11 +261,67 @@ niche is one `Niche(...)` entry — pick a `kind`:
 - `"verse"` — real quoted texts + AI reflection (like bible/KJV)
 - `"news"`  — scraped/discovered topics (like soccer)
 
-Fill in the prompts, image style, tags, YouTube category, description footer,
-fallback scenes, and rotation slots — the entire pipeline (content sourcing,
-script/title/scene generation, analytics variant tracking, freshness guards,
-upload metadata) picks it up automatically. Nothing outside `niches.py`
-branches on a niche name.
+Skeleton of a new "motivation" niche (copy a built-in entry for the full
+prompt texts — the existing four are the best templates):
+
+```python
+"motivation": Niche(
+    key="motivation",
+    kind="story",
+    image_style="cinematic sunrise over mountains, epic golden light, "
+                "inspirational, no text, no watermark",
+    default_tags=("motivation", "discipline", "mindset", "selfimprovement", "shorts"),
+    youtube_category_id="22",           # People & Blogs
+    description_footer="{description}\n\n💪 {channel_name}\n#motivation #Shorts",
+    fallback_scenes=("a lone runner on a mountain road at dawn", ...),
+    channel_style_default="Calm, direct, no-hype motivation — one hard truth per video.",
+    script_prompt="""You are writing a 45-second motivational Short...
+        STORY PREMISE: {title}\n{description}\n{avoid_block}\n{lang_instruction}
+        ...land the ending as {ending_style}...""",
+    scene_prompt="...describe {n} images for this narration: {narration}...",
+    title_prompt="...write ONE title...{avoid_block}...{story}",
+    premise_pool=("Discipline beats motivation and here is why", ...),
+    premise_genre="short, punchy motivational monologues",
+    rotations={"ending_style": ("a challenge to the viewer",
+                                "a quiet reframe of the opening line", ...)},
+    uses_seo_title=True,
+    uses_story_memory=True,
+),
+```
+
+Then `CONTENT_MODE=motivation` in `.env` — the entire pipeline (content
+rotation, script/title/scene generation, analytics variant tracking,
+freshness guards, upload metadata, music install) picks it up automatically.
+Nothing outside `niches.py` branches on a niche name. Optionally drop
+matching beds in `assets/music/motivation/`.
+
+---
+
+## Running multiple channels
+
+Each channel = **its own folder** (a separate clone of this repo) with its own
+`.env`, state, and output — so channels can't interfere with each other:
+
+```bash
+git clone <your-repo-url> ~/channels/motivation-channel
+cd ~/channels/motivation-channel
+cp .env.example .env        # this channel's mode, keys, and YouTube account
+python3 setup_oauth.py      # authorize THIS channel's YouTube account
+```
+
+Then list every channel folder in `channels.json` next to
+`channel_dashboard.py`:
+
+```json
+[
+  { "name": "Daily Manna",   "path": "/home/you/channels/bible-channel" },
+  { "name": "AI Nightmares", "path": "/home/you/channels/scifi-channel" }
+]
+```
+
+`python3 channel_dashboard.py` then manages them all — start/stop, generate
+one now, per-channel settings and logs. To update every channel after a code
+change: commit in your main copy, then `git pull` in each channel folder.
 
 ---
 
