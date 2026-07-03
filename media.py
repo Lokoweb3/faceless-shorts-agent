@@ -128,6 +128,18 @@ class StockAssetFetcher:
     PEXELS_VIDEO = "https://api.pexels.com/videos/search"
     CACHE_KEEP = 500  # max cached images per mode (oldest pruned beyond this)
 
+    # ── Pollinations circuit breaker ──────────────────────────────────────
+    # When the service is saturated it 429s EVERY request; running the full
+    # 4-attempt/35s retry ladder per image then wastes ~4 minutes per video
+    # and dozens of requests that deepen the throttling. After
+    # _LIMIT_STREAK_TO_OPEN consecutive images exhaust their retries on rate
+    # limits, skip Pollinations entirely (straight to cache) for
+    # _CIRCUIT_COOLDOWN seconds. Per-process (class-level) state.
+    _LIMIT_STREAK_TO_OPEN = 2
+    _CIRCUIT_COOLDOWN = 600.0  # seconds
+    _limit_streak = 0
+    _circuit_open_until = 0.0
+
     def __init__(self):
         self.asset_dir = VIDEO_OUTPUT_DIR / "assets"
         self.asset_dir.mkdir(parents=True, exist_ok=True)
@@ -241,7 +253,19 @@ class StockAssetFetcher:
         import asyncio
         max_attempts = 4
         got_image = False
-        for attempt in range(1, max_attempts + 1):
+        rate_limited_out = False
+
+        # Circuit open: Pollinations recently proved saturated — don't burn
+        # 35s of retries per image; use the cache directly until cooldown.
+        cls = StockAssetFetcher
+        if time.monotonic() < cls._circuit_open_until:
+            attempts_range = ()
+            logger.info("Pollinations circuit open — using cached background "
+                        "for %r", query)
+        else:
+            attempts_range = range(1, max_attempts + 1)
+
+        for attempt in attempts_range:
             try:
                 import aiohttp
                 # vary the seed each retry so a flaky prompt gets a fresh roll
@@ -259,6 +283,7 @@ class StockAssetFetcher:
                     img.write_bytes(content)
                     self._cache_store(content, prompt, used_seed)
                     got_image = True
+                    cls._limit_streak = 0  # service healthy again
                     break  # success
                 logger.warning("AI image came back empty for %r (attempt %d/%d)",
                                query, attempt, max_attempts)
@@ -273,8 +298,22 @@ class StockAssetFetcher:
                                    query, delay, attempt, max_attempts)
                     await asyncio.sleep(delay)
                     continue
+                rate_limited_out = is_rate
                 logger.warning(f"AI image fetch failed for {query!r} after "
                                f"{max_attempts} attempts: {_redact(e)}")
+
+        # Track saturation: enough consecutive rate-limited exhaustions
+        # opens the circuit for the cooldown window.
+        if rate_limited_out:
+            cls._limit_streak += 1
+            if cls._limit_streak >= cls._LIMIT_STREAK_TO_OPEN:
+                cls._circuit_open_until = time.monotonic() + cls._CIRCUIT_COOLDOWN
+                cls._limit_streak = 0
+                logger.warning(
+                    "Pollinations rate-limiting persistently — skipping it for "
+                    "the next %.0f minutes (cached backgrounds will be used)",
+                    cls._CIRCUIT_COOLDOWN / 60)
+
         if not got_image:
             # Fall back to a previously generated on-theme image (far better
             # than the generated-gradient fallback, and free/offline).
