@@ -12,6 +12,55 @@ stories), **soccer** (news-driven). Switch with one setting.
 
 ---
 
+## How it works
+
+Every video goes through a 5-step pipeline:
+
+```
+1. CONTENT    pick a real KJV verse (bible) / story premise (scifi, horror)
+              / trending topic (soccer) — rotated so nothing repeats
+2. SCRIPT     AI writes the narration (Ollama Cloud / OpenAI / Anthropic / Grok),
+              with per-niche prompts, rotating hook & ending styles, a content-
+              safety gate, and freshness checks against everything already made
+3. VOICE      ElevenLabs (if configured) or free edge-tts — with per-word
+              timestamps for exactly-synced captions
+4. VIDEO      8 AI images matched to the story beats (Pollinations, cached +
+              rate-limit-protected), Ken Burns motion, karaoke captions,
+              a ducked ambient music bed, 1080x1920 H.264
+5. UPLOAD     YouTube Data API with niche-correct tags & category, daily caps,
+              quota circuit breaker, and a retry queue for finished videos
+              that couldn't upload yet
+```
+
+**It learns from its own results**: each video records which hook/ending/closing
+style produced it; a daily 1-quota-unit stats pull maps real view counts back
+onto those styles, and future videos are biased toward what actually performs
+(with a 20% exploration floor). See "Performance by variant" in the dashboard.
+
+**It defends itself**: expired-token detection with exact fix instructions,
+a quota circuit breaker (pauses until YouTube's reset instead of failing
+hourly), a Pollinations circuit breaker (cached images when the free service
+is saturated), atomic state files with corruption backup, a cross-process lock
+against double-uploads, and title/hook repetition guards seeded from your
+channel's real history.
+
+**File map** (the short version):
+
+| File | Role |
+|---|---|
+| `agent.py` | orchestrator, scheduler, CLI |
+| `niches.py` | ALL per-niche content: prompts, styles, tags, pools, flags |
+| `discovery.py` | content selection (verses / premises / news scraping) |
+| `script.py` | AI script + title + scene-prompt generation, freshness |
+| `voiceover.py` | TTS + word timings + music bed management |
+| `media.py` | images, captions, audio mix, video assembly |
+| `publisher.py` | YouTube upload, quota guard, analytics |
+| `dashboard.py` / `channel_dashboard.py` | control room / multi-channel panel |
+| `doctor.py` / `setup_oauth.py` | health check / OAuth wizard |
+| `storage.py` / `localweb.py` | atomic state + locks / dashboard auth |
+
+---
+
 ## ⚠️ Read this first (honest expectations)
 
 - This is a **personal, self-hosted tool**, not a hosted service. You install it and run it yourself.
@@ -123,6 +172,9 @@ Every option is documented inline in `.env.example`.
 ## Run
 
 ```bash
+# 0) check everything first — system, keys, YouTube auth, AI, images:
+python3 doctor.py             # or: ./run.sh --doctor
+
 # 1) safest first: build ONE video without uploading
 python3 agent.py --once --dry-run
 
@@ -135,6 +187,35 @@ tail -f agent.log          # watch it;  pkill -f agent.py  to stop
 ```
 
 Review your first videos (set to **private**) before switching `UPLOAD_PRIVACY=public`.
+
+Other useful commands:
+
+```bash
+python3 agent.py --status          # queue size, published today, caps
+python3 agent.py --refresh-stats   # pull view counts, print per-variant performance
+python3 dashboard.py               # web control room (status, queue, logs,
+                                   #   run/dry-run buttons, variant performance)
+```
+
+Dashboards print a URL containing a **one-time access token** — open that exact
+URL (it also auto-opens). A fresh token is minted on every restart.
+
+---
+
+## Add your own niche
+
+All niche-specific behavior lives in **one file**: `niches.py`. Adding a fifth
+niche is one `Niche(...)` entry — pick a `kind`:
+
+- `"story"` — original AI stories from a premise pool (like scifi/horror)
+- `"verse"` — real quoted texts + AI reflection (like bible/KJV)
+- `"news"`  — scraped/discovered topics (like soccer)
+
+Fill in the prompts, image style, tags, YouTube category, description footer,
+fallback scenes, and rotation slots — the entire pipeline (content sourcing,
+script/title/scene generation, analytics variant tracking, freshness guards,
+upload metadata) picks it up automatically. Nothing outside `niches.py`
+branches on a niche name.
 
 ---
 
@@ -266,5 +347,8 @@ Harmless — it happens when the browser closes a log request early. The current
 
 ## License
 
-Add your own license (e.g. MIT) before publishing. You are responsible for your channel,
-your content, and your compliance with all third-party terms.
+MIT — see [LICENSE](LICENSE) (put your name in the copyright line before
+publishing). You are responsible for your channel, your content, and your
+compliance with all third-party terms. The bundled music beds in
+`assets/music/` are synthesized for this project and carry no third-party
+license.
