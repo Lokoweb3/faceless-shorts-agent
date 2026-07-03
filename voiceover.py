@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-from config import config, AUDIO_OUTPUT_DIR, _get_env
+from config import config, AUDIO_OUTPUT_DIR, BASE_DIR, CONTENT_MODE, _get_env
 
 logger = logging.getLogger(__name__)
 
@@ -231,25 +231,55 @@ class EdgeTTS:
 class BackgroundMusic:
     """Manages royalty-free background music tracks."""
 
+    BUNDLED_DIR = BASE_DIR / "assets" / "music"
+
     def __init__(self):
         self.music_dir = AUDIO_OUTPUT_DIR / "music"
         self.music_dir.mkdir(parents=True, exist_ok=True)
         self._ensure_default_tracks()
 
     def _ensure_default_tracks(self):
-        """Create placeholder for music tracks. Users should add their own."""
+        """First run: install the bundled ambient beds for the active niche
+        (assets/music/<mode>/ — self-authored, license-clean) so videos have
+        an audio bed out of the box. Runs ONCE (marker file): if the user
+        later deletes or replaces tracks, their choice is respected.
+        """
+        marker = self.music_dir / ".bundled_installed"
+        bundled = self.BUNDLED_DIR / CONTENT_MODE
+        if not marker.exists() and bundled.is_dir():
+            import shutil
+            copied = 0
+            for src in sorted(bundled.glob("*.mp3")):
+                dst = self.music_dir / src.name
+                if not dst.exists():
+                    try:
+                        shutil.copy(str(src), str(dst))
+                        copied += 1
+                    except OSError as e:
+                        logger.warning(f"Could not install bundled track {src.name}: {e}")
+            try:
+                marker.write_text("bundled beds installed; delete tracks freely — "
+                                  "they will not be re-copied.\n")
+            except OSError:
+                pass
+            if copied:
+                logger.info(f"Installed {copied} bundled music bed(s) for "
+                            f"'{CONTENT_MODE}' — replace or remove them in "
+                            f"{self.music_dir} anytime")
+
         readme = self.music_dir / "README.txt"
         if not readme.exists():
             with open(readme, "w") as f:
                 f.write(
-                    "Add royalty-free background music tracks to this directory.\n"
+                    "Background music tracks for this channel live here.\n"
                     "Supported formats: mp3, wav, m4a, ogg\n\n"
-                    "Recommended sources:\n"
+                    "Bundled ambient beds (from assets/music/) are installed on\n"
+                    "first run; delete or replace them freely — they won't come back.\n\n"
+                    "Sources for real tracks (check licenses):\n"
                     "- YouTube Audio Library\n"
-                    "- Uppbeat (https://uppbeat.io)\n"
                     "- Pixabay Music (https://pixabay.com/music)\n"
-                    "- Free Music Archive (https://freemusicarchive.org)\n\n"
-                    "Track naming: track_01.mp3, track_02.mp3, etc.\n"
+                    "- Uppbeat (https://uppbeat.io)\n"
+                    "- Free Music Archive (https://freemusicarchive.org)\n"
                 )
 
     def get_random_track(self) -> Optional[Path]:

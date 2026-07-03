@@ -17,7 +17,9 @@ outputs/
 *.jpg
 *.jpeg
 *.png
-!assets/**          # keep bundled brand assets if any
+# keep bundled assets (verse list, music beds). NOTE: gitignore has no
+# inline comments — this negation must sit alone on its line to work.
+!assets/**
 
 # ─── Runtime state & logs ────────────────────────────────────
 state/

@@ -207,6 +207,16 @@ Set `UPLOAD_PRIVACY=private` in `.env` (or `unlisted`) and **restart the agent**
 **Lots of `429 Too Many Requests` on images.**
 The free Pollinations image service is rate-limiting you — usually from generating too many videos at once (multiple channels, high `MAX_DAILY_UPLOADS`). The agent now defends itself three ways: it spaces image requests out (`AI_IMAGE_MIN_INTERVAL`, default 4s), it uses fewer images per video (`SECONDS_PER_CLIP`, default 8s per segment), and when a request still fails it **reuses a previously generated on-theme image** from `data/image_cache/` instead of a plain gradient — so quality holds up even under rate-limiting. If it persists: lower your upload rate, add a `POLLINATIONS_API_KEY`, or switch `ASSET_PROVIDER` to `pexels` (free key).
 
+### Music
+
+**Videos have a quiet ambient bed by default.** Self-authored, license-clean
+beds ship in `assets/music/` (warm pads for bible, dark drones for scifi/horror)
+and are installed into `output/audio/music/` on first run. Replace them with any
+mp3/wav you like (Pixabay Music, YouTube Audio Library) — or delete them for
+silence; they won't be re-copied. Bed loudness knob: `background_music_volume`
+in config (default 0.15). Regenerate the bundled beds with
+`./tools/generate_music.sh`.
+
 ### Script / AI model
 
 **Script step fails or returns nothing.**
