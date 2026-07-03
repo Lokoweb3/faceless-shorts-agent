@@ -770,6 +770,15 @@ class AudioProcessor:
 
         if music_path and music_path.exists():
             # Voiceover at full volume; music ducks under it.
+            # NOTE: no alimiter on the sidechain — its attack/release are in
+            # MILLISECONDS (min 0.1/1), so the old seconds-valued args made
+            # ffmpeg reject the whole graph (this path never worked until
+            # music files first existed). The limiter was pointless anyway:
+            # it "limited" a sidechain-only signal. ducking_release (seconds)
+            # now maps to sidechaincompress release (ms). amix halves both
+            # inputs (1/n normalization), so volume=2 restores the voiceover
+            # to full level; the final limiter catches the rare vo+music peak.
+            release_ms = max(int(config.video.ducking_release * 1000), 1)
             cmd = [
                 "ffmpeg", "-y",
                 "-i", str(video_path),
@@ -778,10 +787,12 @@ class AudioProcessor:
                 "-filter_complex",
                 (
                     f"[1:a]asplit=2[vo1][vo2];"
-                    f"[vo2]alimiter=limit=1:attack=0.01:release={config.video.ducking_release}[side];"
                     f"[2:a]volume={config.video.background_music_volume}[music];"
-                    f"[music][side]sidechaincompress=threshold=-20dB:ratio=10:attack=10:release=500[music_ducked];"
-                    f"[vo1][music_ducked]amix=inputs=2:duration=first:dropout_transition=2[audio_out]"
+                    f"[music][vo2]sidechaincompress=threshold=-20dB:ratio=10:"
+                    f"attack=10:release={release_ms}[music_ducked];"
+                    f"[vo1][music_ducked]amix=inputs=2:duration=first:"
+                    f"dropout_transition=2,volume=2,"
+                    f"alimiter=limit=0.97:attack=5:release=50[audio_out]"
                 ),
                 "-map", "0:v",
                 "-map", "[audio_out]",
