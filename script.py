@@ -204,6 +204,11 @@ class ScriptGenerator:
         Generate a complete script for a content item.
         Returns dict with: full_text, sections, hook, cta, metadata.
         """
+        # JSON single-call niches: one generation returns script + title +
+        # scenes + description; code-level guards verify the output.
+        if NICHE.script_output == "json" and NICHE.kind == "verse":
+            return await self._generate_json_verse(content_item)
+
         template = SCRIPT_TEMPLATES.get(
             config.categories.get(category, {}).get("script_format", "legendary"),
             SCRIPT_TEMPLATES["legendary"]
@@ -339,6 +344,165 @@ class ScriptGenerator:
         # Save script
         await self._save_script(script_data)
 
+        return script_data
+
+    # ── JSON single-call generation (verse niches) ───────────────────────
+
+    @staticmethod
+    def _parse_json_block(raw: str) -> Optional[dict]:
+        """Extract the first JSON object from model output, tolerating fences
+        and stray commentary. None if nothing parseable."""
+        s = (raw or "").strip()
+        s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.MULTILINE).strip()
+        start, end = s.find("{"), s.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            data = json.loads(s[start:end + 1], strict=False)
+        except json.JSONDecodeError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _verse_verbatim(verse: str, script: str) -> bool:
+        """True if the verse's WORDING appears in the script — compared on
+        letters/digits only, so quote style and punctuation don't matter but
+        a single changed/paraphrased word fails."""
+        strip = lambda s: re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+        v = strip(verse)
+        return bool(v) and v in strip(script)
+
+    async def _generate_json_verse(self, content_item: Any) -> Optional[Dict[str, Any]]:
+        """Single-call generation for verse niches: the niche's JSON prompt
+        returns title/hook/script/scenes/description/pinned_comment at once.
+
+        Code-enforced guards (the prompt's SELF-CHECK is not trusted):
+        - verse text verbatim in the script (retry once, else SKIP the item —
+          altered scripture must never publish)
+        - hook similarity vs recent openings (retry once, keep best)
+        - title freshness (dup/fuzzy/cooldowns + retries + forced-unique)
+        """
+        reference = getattr(content_item, "title", "")
+        verse_text = getattr(content_item, "description", "")
+        dur = config.video.target_duration_seconds
+        word_count = int(round(dur / 60 * 145))
+        published = self._load_title_history()[-15:]
+        published_block = ("\n".join(f"- {t}" for t in published)
+                           or "- (none published yet)")
+        prompt = NICHE.script_prompt.format(
+            verse_reference=reference, verse_text=verse_text,
+            target_duration=dur, word_count=word_count,
+            published_titles=published_block)
+
+        # Hook steering up front, as in the marker path.
+        recent_hooks = self._load_hook_history() if NICHE.uses_story_memory else []
+        if recent_hooks:
+            prompt += ("\n\nRECENT OPENING LINES — your hook must NOT resemble "
+                       "any of these in imagery or wording:\n- "
+                       + "\n- ".join(recent_hooks[-10:]))
+
+        data, note = None, ""
+        for attempt in (1, 2):
+            raw = await self._call_ai(prompt + note, max_tokens=1600)
+            if not raw:
+                continue
+            parsed = self._parse_json_block(raw)
+            if not parsed or not (parsed.get("script") or "").strip():
+                logger.warning(f"JSON script output unparseable (attempt {attempt}/2)")
+                note = ("\n\nIMPORTANT: your previous output was not valid JSON. "
+                        "Output ONLY the JSON object, no fences, no commentary.")
+                continue
+            if not self._verse_verbatim(verse_text, parsed["script"]):
+                logger.warning(f"Verse not verbatim in script (attempt {attempt}/2) "
+                               f"— regenerating")
+                note = ("\n\nCRITICAL: your previous output altered the verse text. "
+                        "The verse must appear in the script character-for-character "
+                        "exactly as provided in INPUTS.")
+                continue
+            data = parsed
+            break
+        if not data:
+            logger.error("JSON generation failed (unparseable or verse altered "
+                         "twice) — skipping this item; altered scripture never "
+                         "publishes. Will retry next cycle.")
+            return None
+
+        script_text = data["script"].strip()
+        hook = (data.get("hook") or "").strip() or \
+            self._extract_hook_line({}, script_text)
+
+        # Hook freshness backstop: one regeneration with offenders named.
+        offenders = self._similar_hooks(hook, recent_hooks) if recent_hooks else []
+        if offenders:
+            logger.info(f"Hook too similar to a recent opening — regenerating once "
+                        f"({hook[:60]!r} ~ {offenders[0][:60]!r})")
+            retry_raw = await self._call_ai(
+                prompt + "\n\nIMPORTANT: your previous hook repeated recent imagery. "
+                "It must NOT resemble:\n- " + "\n- ".join(offenders[:5]),
+                max_tokens=1600)
+            retry = self._parse_json_block(retry_raw or "")
+            if retry and (retry.get("script") or "").strip() \
+                    and self._verse_verbatim(verse_text, retry["script"]):
+                r_hook = (retry.get("hook") or "").strip()
+                if r_hook and not self._similar_hooks(r_hook, recent_hooks):
+                    data, script_text, hook = retry, retry["script"].strip(), r_hook
+                else:
+                    logger.warning("Retry hook still similar — keeping the original")
+
+        # Word-count sanity (prompt asks ±10%; log-only, never fatal).
+        n_words = len(script_text.split())
+        if not (word_count * 0.7 <= n_words <= word_count * 1.5):
+            logger.warning(f"Script length {n_words} words vs target {word_count} "
+                           f"— outside comfort range but publishing anyway")
+
+        variants: Dict[str, str] = {}
+        theme = (data.get("emotional_theme") or "").strip()[:60]
+        if theme:
+            variants["emotional_theme"] = theme
+
+        scenes = [str(s).strip()[:200] for s in (data.get("scene_prompts") or [])
+                  if str(s).strip()][:8]
+
+        script_data: Dict[str, Any] = {
+            "full_text": script_text,
+            "sections": {"hook": hook, "script": script_text},
+            "hook": hook,
+            "cta": "",
+            "template": "json_verse",
+            "category": f"{NICHE.key}_verse",
+            "language": "en",
+            "title": reference,
+            "estimated_duration_seconds": self._estimate_duration(script_text),
+            "variants": variants,
+        }
+        if scenes:
+            script_data["scenes"] = scenes
+        desc = (data.get("description") or "").strip()
+        if desc:
+            script_data["description_override"] = desc[:900]
+        pinned = (data.get("pinned_comment") or "").strip()
+        if pinned:
+            script_data["pinned_comment"] = pinned[:1000]
+
+        # Title: JSON title is the first candidate; the code-level freshness
+        # machinery (dup/fuzzy/cooldowns, retries, verse-ref forcing) decides.
+        self._last_title_pattern = ""
+        title = (data.get("title") or "").strip()[:90]
+        if title and NICHE.enforce_title_freshness:
+            title = await self._ensure_fresh_title(title, script_text,
+                                                   reference=reference)
+        if title:
+            script_data["seo_title"] = title
+            logger.info(f"SEO title: {title}")
+            if self._last_title_pattern:
+                variants["title_pattern"] = self._last_title_pattern
+        if theme:
+            logger.info(f"Emotional theme: {theme}")
+
+        if NICHE.uses_story_memory:
+            self._remember_hook(hook)
+
+        await self._save_script(script_data)
         return script_data
 
     async def generate_scene_prompts(self, narration: str, n: int = 8) -> List[str]:
@@ -746,34 +910,39 @@ class ScriptGenerator:
             template_name=template.name,
             structure=", ".join(template.structure), **chosen)
 
-    async def _call_ai(self, prompt: str) -> Optional[str]:
-        """Call AI model (Grok, OpenAI, Anthropic, or local)."""
+    async def _call_ai(self, prompt: str,
+                       max_tokens: Optional[int] = None) -> Optional[str]:
+        """Call AI model (Grok, OpenAI, Anthropic, or local).
+
+        max_tokens raises the output budget for long structured outputs
+        (e.g. single-call JSON scripts); None keeps each provider's default.
+        """
         # Try Grok (xAI) first if configured
         if config.api.xai_api_key:
-            result = await self._call_grok(prompt)
+            result = await self._call_grok(prompt, max_tokens)
             if result:
                 return result
 
         # Try OpenAI
         if config.api.openai_api_key:
-            result = await self._call_openai(prompt)
+            result = await self._call_openai(prompt, max_tokens)
             if result:
                 return result
 
         # Try Anthropic
         if config.api.anthropic_api_key:
-            result = await self._call_anthropic(prompt)
+            result = await self._call_anthropic(prompt, max_tokens)
             if result:
                 return result
 
         # Try local model (Ollama)
-        result = await self._call_local(prompt)
+        result = await self._call_local(prompt, max_tokens)
         if result:
             return result
 
         return None
 
-    async def _call_grok(self, prompt: str) -> Optional[str]:
+    async def _call_grok(self, prompt: str, max_tokens: Optional[int] = None) -> Optional[str]:
         """Call xAI Grok via its OpenAI-compatible chat completions endpoint."""
         try:
             async with aiohttp.ClientSession() as session:
@@ -783,7 +952,7 @@ class ScriptGenerator:
                         {"role": "system", "content": "You are a professional soccer content creator writing YouTube Shorts scripts."},
                         {"role": "user", "content": prompt}
                     ],
-                    "max_tokens": 600,
+                    "max_tokens": max_tokens or 600,
                     "temperature": 0.8,
                 }
                 headers = {
@@ -804,7 +973,7 @@ class ScriptGenerator:
             logger.error(f"Grok error: {e}")
             return None
 
-    async def _call_openai(self, prompt: str) -> Optional[str]:
+    async def _call_openai(self, prompt: str, max_tokens: Optional[int] = None) -> Optional[str]:
         """Call OpenAI API."""
         try:
             async with aiohttp.ClientSession() as session:
@@ -814,7 +983,7 @@ class ScriptGenerator:
                         {"role": "system", "content": "You are a professional soccer content creator writing YouTube Shorts scripts."},
                         {"role": "user", "content": prompt}
                     ],
-                    "max_tokens": 500,
+                    "max_tokens": max_tokens or 500,
                     "temperature": 0.8,
                 }
                 headers = {
@@ -835,13 +1004,13 @@ class ScriptGenerator:
             logger.error(f"OpenAI error: {e}")
             return None
 
-    async def _call_anthropic(self, prompt: str) -> Optional[str]:
+    async def _call_anthropic(self, prompt: str, max_tokens: Optional[int] = None) -> Optional[str]:
         """Call Anthropic API (Claude Fable 5)."""
         try:
             async with aiohttp.ClientSession() as session:
                 payload = {
                     "model": config.api.anthropic_model,
-                    "max_tokens": 2000,
+                    "max_tokens": max_tokens or 2000,
                     # Fable 5 always thinks; keep it shallow for this short
                     # script task so reasoning doesn't consume the token budget.
                     "output_config": {"effort": "low"},
@@ -878,7 +1047,7 @@ class ScriptGenerator:
             logger.error(f"Anthropic error: {e}")
             return None
 
-    async def _call_local(self, prompt: str) -> Optional[str]:
+    async def _call_local(self, prompt: str, max_tokens: Optional[int] = None) -> Optional[str]:
         """Call an Ollama model (local instance OR Ollama Cloud).
 
         Works with a plain local Ollama (no auth) and with Ollama Cloud /
@@ -898,7 +1067,7 @@ class ScriptGenerator:
                     "think": False,   # keep reasoning models from "thinking" into the script
                     "options": {
                         "temperature": 0.8,
-                        "num_predict": 500,
+                        "num_predict": max_tokens or 500,
                     }
                 }
                 async with session.post(

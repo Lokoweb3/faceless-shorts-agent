@@ -366,6 +366,11 @@ class ContentPipeline:
         hook = (sections.get("hook") or script_data.get("hook") or "").strip()
         full_text = (script_data.get("full_text") or item.description or "").strip()
 
+        # JSON-generated scripts carry their own purpose-written description.
+        override = (script_data.get("description_override") or "").strip()
+        if override:
+            return override[:900]
+
         if NICHE.kind == "verse":
             verse = (sections.get("verse") or "").strip()
             parts = [p for p in (hook, verse) if p]

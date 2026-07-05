@@ -149,7 +149,9 @@ class Niche:
 
     # ── Prompts ──
     # script_prompt placeholders by kind:
-    #   verse: {verse_text} {reference} {lang_instruction} + rotation slots
+    #   verse (markers): {verse_text} {reference} {lang_instruction} + rotation slots
+    #   verse (json):    {verse_reference} {verse_text} {target_duration}
+    #                    {word_count} {published_titles}
     #   story: {channel_style} {title} {description} {avoid_block}
     #          {lang_instruction} {ending_style}
     #   news:  {channel_style} {title} {description} {sources}
@@ -157,6 +159,11 @@ class Niche:
     script_prompt: str
     # scene_prompt placeholders: {n} {narration}
     scene_prompt: str
+    # "markers": AI returns [HOOK]/[BUILD]-tagged text, parsed into sections;
+    # separate calls make scenes/title. "json": ONE call returns
+    # title/hook/script/scene_prompts/description/pinned_comment as JSON —
+    # code still verifies verse verbatim, title freshness, hook similarity.
+    script_output: str = "markers"
     # title_prompt placeholders: {avoid_block} {story} (+ {steer} for verse)
     title_prompt: str = ""
     channel_style_default: str = ""
@@ -470,26 +477,77 @@ Write the complete story with clear section markers like [HOOK], [BUILD], [TWIST
             "a quiet mountaintop above the clouds bathed in golden light",
             "sunbeams streaming through a forest canopy onto a peaceful path",
         ),
-        script_prompt="""You are writing a short, uplifting Christian devotional for a YouTube Short (vertical, ~45 seconds). It pairs ONE real Bible verse with a warm, encouraging reflection.
+        # Single-call JSON prompt: one generation returns script + title +
+        # scenes + description + pinned comment. Placeholders are filled by
+        # script.py; code-level guards (verse verbatim, title freshness,
+        # hook similarity) still verify the output — prompt rules alone are
+        # not trusted.
+        script_output="json",
+        script_prompt="""You are a scriptwriter for "Daily Manna," a YouTube Shorts channel of scripture-based
+devotionals. Your scripts feel like a trusted friend speaking directly to one hurting
+person at 11pm — intimate, warm, specific. Never preachy, never generic, never like
+a sermon or an ad.
 
-THE VERSE (King James Version) — use it EXACTLY as written, do not change a single word:
+INPUTS
+Verse reference: {verse_reference}
+Exact verse text (use VERBATIM — never paraphrase, never quote from memory):
 "{verse_text}"
-Reference: {reference}
+Target spoken duration: {target_duration} seconds (~{word_count} words at 145 wpm)
+Recently published titles (avoid anything similar in wording OR concept):
+{published_titles}
 
-RULES:
-- Open with ONE relatable line that hooks instantly. For THIS devotional, make the opening {hook_style}. Vary it — do NOT default to starting with "When you feel...".
-- Then present the verse, naturally, quoting it EXACTLY as given above. Do NOT alter, paraphrase, or invent any scripture.
-- Then 5-7 sentences of warm, encouraging reflection that EXPAND on the meaning: what this verse reveals about God's character, how it speaks to a real struggle someone might be facing today, and what it looks like to actually live it out. Go deeper than a single thought — unfold the verse gently and personally, as if speaking to one tired friend.
-- End with a gentle, uplifting takeaway. Vary the wording — do NOT use "Carry this peace with you today"; instead use something fresh like {closing}.
-- Then close with ONE short, warm invitation to like and subscribe — kept gentle and on-tone, never salesy or shouty. Use a soft phrasing such as: "If this blessed you, tap like and subscribe for a verse like this every day." or "Like and subscribe to receive your daily manna." Keep it to a single sentence.
-- About 180-210 words total (about 60-75 seconds spoken). Calm, sincere, reverent, unhurried tone — never preachy or fire-and-brimstone.
-- Non-denominational and inclusive. Do NOT add doctrine, interpretation disputes, or anything political.
-- Output ONLY the spoken words — no stage directions, no emojis, no markdown, no labels.
+SCRIPT STRUCTURE
+1. HOOK (first 2 lines, under 5 seconds): Name the listener's specific pain in
+   second person, present tense. Make them feel caught. Not "life can be hard" —
+   instead like: "You smiled at everyone today. And nobody asked if you were okay."
+2. TURN: Introduce the verse naturally ("There's a promise in {verse_reference}
+   for exactly this moment"), then deliver the verse text verbatim.
+3. APPLICATION: 2-3 sentences making the verse land on the specific pain from the
+   hook. Concrete, present tense, "you" language.
+4. LOOP-FRIENDLY CLOSE: The final line must flow naturally back into the first
+   line if the video replays, so it loops seamlessly. End on a quiet, resonant
+   statement — never "in conclusion," never a summary.
+5. Append exactly one soft CTA, max 8 words, e.g. "Follow for tomorrow's verse."
 
-{lang_instruction}
+EMOTIONAL TARGETING
+Choose ONE specific, visceral emotional situation as the through-line. Draw from
+underused territory: grief, betrayal, shame, regret, invisible labor, anxiety at
+3am, feeling behind in life, a strained relationship, praying without answers,
+smiling through pain. BANNED as primary theme (overused): "overwhelmed," "tired,"
+generic "peace." Specific beats general: "the friend who stopped calling" beats
+"loneliness."
 
-Write the complete devotional with clear section markers like [HOOK], [VERSE], [REFLECTION].
-""",
+TITLE RULES
+- Must NOT match the pattern "[Noun] For When You Feel [Emotion]" — that template
+  is retired.
+- Must not resemble any title in the published list above (same emotion + same
+  promise = duplicate, even with different words).
+- Under 60 characters, emotionally specific, curiosity or recognition driven.
+  Good shapes: a direct promise ("Let God Fight Your Battles"), a named moment
+  ("For the Night You Can't Stop Crying"), a gentle question, a bold claim.
+- End with #Shorts.
+
+SCENE PROMPTS
+Produce 8 visual scene prompts matched to the script's emotional beats, in the
+channel's style: cinematic, soft film grain, shallow depth of field, warm natural
+light, no faces in close-up, no text in image, no religious iconography clichés
+(no glowing crosses, no stock-photo praying hands).
+
+OUTPUT — valid JSON only, no markdown fences, no commentary:
+{{
+  "title": "...",
+  "emotional_theme": "...",
+  "hook": "...",
+  "script": "full spoken script including verse verbatim and CTA",
+  "scene_prompts": ["...", "...", "...", "...", "...", "...", "...", "..."],
+  "description": "2-3 sentence YouTube description with the verse reference and 3 hashtags",
+  "pinned_comment": "the full verse text with reference, plus one short warm line"
+}}
+
+SELF-CHECK before answering: (1) verse text appears character-for-character as
+provided, (2) title matches no banned pattern and no published title's concept,
+(3) script is within ±10% of target word count, (4) last line loops into the first.
+If any check fails, silently fix and re-verify before outputting.""",
         scene_prompt=(
             "You are an art director for a reverent Christian devotional YouTube Short.\n"
             "Read this devotional and describe {n} beautiful, peaceful background images "
@@ -515,10 +573,6 @@ Write the complete devotional with clear section markers like [HOOK], [VERSE], [
             "the devotional doesn't deliver. Output only the title.\n\n"
             "DEVOTIONAL:\n{story}"),
         title_patterns={
-            "formula": (
-                "Emotion formula: '<Emotion> For When You <Feel/Are> <Struggle>'. "
-                "Example: 'Strength For When You Feel Like Giving Up'. "
-                "NO Bible reference in the title."),
             "question": (
                 "Question form: open with the feeling as a short question, then the "
                 "reassurance. Example: 'Feeling Unseen? God Sees You'. "
@@ -540,7 +594,6 @@ Write the complete devotional with clear section markers like [HOOK], [VERSE], [
                 "Example: 'Read This Before You Give Up Today'. "
                 "NO Bible reference in the title."),
         },
-        rotations={"hook_style": BIBLE_HOOK_STYLES, "closing": BIBLE_CLOSINGS},
         uses_seo_title=True,
         uses_story_memory=True,
         enforce_title_freshness=True,
