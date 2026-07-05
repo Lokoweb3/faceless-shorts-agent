@@ -194,6 +194,9 @@ class ScriptGenerator:
         # recent _build_prompt chose — recorded into script_data so the
         # analytics loop can join performance back onto them.
         self._last_variants: Dict[str, str] = {}
+        # Structural title pattern chosen by the most recent generate_title
+        # (empty when the niche has no patterns) — recorded with variants.
+        self._last_title_pattern: str = ""
 
     async def generate(self, content_item: Any, category: str,
                        language: str = "en") -> Optional[Dict[str, Any]]:
@@ -306,14 +309,30 @@ class ScriptGenerator:
         # SEO hook title (short, punchy, keyword-first) for niches that use it
         if NICHE.uses_seo_title:
             try:
-                seo = await self.generate_title(full_text)
+                self._last_title_pattern = ""
+                # Verse niches: the reference (item title) enables the
+                # verse-anchored pattern and the forced-unique fallback.
+                reference = (script_data.get("title", "")
+                             if NICHE.kind == "verse" else "")
+                # Recent titles go into the FIRST prompt too, so the model
+                # varies structure up front instead of only after rejection.
+                first_avoid = (self._load_title_history()[-10:]
+                               if NICHE.enforce_title_freshness else None)
+                seo = await self.generate_title(full_text,
+                                                avoid_titles=first_avoid,
+                                                reference=reference)
                 # Enforce freshness against the recent-title history
-                # (dup/banned-word check + retry + mechanical fix).
+                # (dup/fuzzy/cooldowns + retries + mechanical/forced fix).
                 if seo and NICHE.enforce_title_freshness:
-                    seo = await self._ensure_fresh_title(seo, full_text)
+                    seo = await self._ensure_fresh_title(seo, full_text,
+                                                         reference=reference)
                 if seo:
                     script_data["seo_title"] = seo
                     logger.info(f"SEO title: {seo}")
+                    # Record the structural pattern for the analytics loop.
+                    if self._last_title_pattern:
+                        variants["title_pattern"] = self._last_title_pattern
+                        script_data["variants"] = variants
             except Exception as e:
                 logger.warning(f"Title generation failed: {e}")
 
@@ -462,7 +481,7 @@ class ScriptGenerator:
         hist = self._load_title_history()
         hist.append(title)
         try:
-            atomic_write_json(self._TITLE_HISTORY_FILE, hist[-40:])
+            atomic_write_json(self._TITLE_HISTORY_FILE, hist[-50:])
         except OSError:
             pass
 
@@ -494,21 +513,33 @@ class ScriptGenerator:
         words = norm.split()
         return " ".join(words[-2:]) if len(words) >= 2 else norm
 
+    # A candidate whose normalized text matches a remembered title at or
+    # above this SequenceMatcher ratio is a near-duplicate even if no
+    # formula rule catches it ('Peace For When You Feel Alone' vs
+    # 'Grace For When You Feel Alone').
+    _FUZZY_DUP_THRESHOLD = 0.82
+
     def _title_problem(self, title: str, recent: list) -> str:
         """Return why a title is unacceptable, or '' if it's fine.
 
-        Checks exact duplicates AND formula fatigue: the channel's titles all
-        share the '<Lead> For When You Feel <Feeling>' shape, so repeating
-        the lead or the feeling within a short window reads as the same
-        video even when the full title differs ('Peace For When You Feel X'
-        five posts in a row).
+        Checks exact duplicates, fuzzy near-duplicates, AND formula fatigue:
+        the channel's titles often share the '<Lead> For When You Feel
+        <Feeling>' shape, so repeating the lead or the feeling within a
+        short window reads as the same video even when the full title
+        differs ('Peace For When You Feel X' five posts in a row).
         """
+        import difflib
         low = title.lower()
         if any(w in low for w in NICHE.banned_title_words):
             return "banned word"
-        recent_norm = {self._norm_title(t) for t in recent}
-        if self._norm_title(title) in recent_norm:
-            return "duplicate of a recent title"
+        norm = self._norm_title(title)
+        for old in recent:
+            old_norm = self._norm_title(old)
+            if norm == old_norm:
+                return "duplicate of a recent title"
+            ratio = difflib.SequenceMatcher(None, norm, old_norm).ratio()
+            if ratio >= self._FUZZY_DUP_THRESHOLD:
+                return f"too similar to recent title {old!r} (ratio {ratio:.2f})"
         lead = self._title_lead(title)
         if lead and lead in {self._title_lead(t) for t in recent[-self._LEAD_COOLDOWN:]}:
             return f"lead word {lead!r} used within the last {self._LEAD_COOLDOWN} titles"
@@ -518,58 +549,82 @@ class ScriptGenerator:
             return f"feeling {feeling!r} used within the last {self._FEELING_COOLDOWN} titles"
         return ""
 
-    async def _ensure_fresh_title(self, title: str, story_text: str) -> str:
+    async def _ensure_fresh_title(self, title: str, story_text: str,
+                                  reference: str = "") -> str:
         """Enforce title freshness in CODE, not just in the prompt.
 
-        Checks against the recent-title history; retries once with the
-        avoid-list spelled out; finally builds a fresh title mechanically
-        (bible-formula) so a repeat can never ship. The accepted title is
+        Checks against the recent-title history; retries up to 3 times with
+        the rejected candidates spelled out; then tries the mechanical
+        formula builder; finally appends the verse reference to FORCE
+        uniqueness so a repeat can never ship. The accepted title is
         remembered in data/title_history.json.
         """
         recent = self._load_title_history()
+        rejected: list = []
 
         problem = self._title_problem(title, recent)
-        if problem:
-            logger.info(f"Title rejected ({problem}): {title!r} — regenerating")
-            retry = await self.generate_title(story_text,
-                                              avoid_titles=recent[-15:])
-            if retry and not self._title_problem(retry, recent):
-                title = retry
-            elif NICHE.mech_title_leads:
-                # Mechanical guarantee: build a fresh formula title from the
-                # niche's lead/feeling word lists (the lead/feeling cooldowns
-                # in _title_problem steer it away from recent repeats).
-                used = " ".join(self._norm_title(t) for t in recent)
-                feelings = [f for f in NICHE.mech_title_feelings
-                            if f.lower() not in used] or list(NICHE.mech_title_feelings)
-                leads = list(NICHE.mech_title_leads)
-                random.shuffle(leads)
-                random.shuffle(feelings)
-                done = False
-                for lead in leads:
-                    for feel in feelings:
-                        verb = "Are" if feel in ("Tired Of Waiting",
-                                                 "Running On Empty") else "Feel"
-                        candidate = f"{lead} For When You {verb} {feel}"
-                        if not self._title_problem(candidate, recent):
-                            logger.info(f"Title fixed mechanically: {candidate}")
-                            title = candidate
-                            done = True
-                            break
-                    if done:
+        attempts = 0
+        while problem and attempts < 3:
+            attempts += 1
+            logger.info(f"Title rejected ({problem}): {title!r} — regenerating "
+                        f"(attempt {attempts}/3)")
+            rejected.append(title)
+            retry = await self.generate_title(
+                story_text, avoid_titles=(recent[-15:] + rejected),
+                reference=reference)
+            if not retry:
+                break
+            title = retry
+            problem = self._title_problem(title, recent)
+
+        if problem and NICHE.mech_title_leads:
+            # Mechanical pass: build a fresh formula title from the niche's
+            # lead/feeling word lists (the dup/fuzzy/cooldown checks steer it
+            # away from everything recent).
+            used = " ".join(self._norm_title(t) for t in recent)
+            feelings = [f for f in NICHE.mech_title_feelings
+                        if f.lower() not in used] or list(NICHE.mech_title_feelings)
+            leads = list(NICHE.mech_title_leads)
+            random.shuffle(leads)
+            random.shuffle(feelings)
+            for lead in leads:
+                for feel in feelings:
+                    verb = "Are" if feel in ("Tired Of Waiting",
+                                             "Running On Empty") else "Feel"
+                    candidate = f"{lead} For When You {verb} {feel}"
+                    if not self._title_problem(candidate, recent):
+                        logger.info(f"Title fixed mechanically: {candidate}")
+                        title, problem = candidate, ""
                         break
+                if not problem:
+                    break
+
+        if problem and reference:
+            # Final guarantee: the verse reference makes any title unique
+            # (references rotate through the whole pool before repeating).
+            title = f"{title} — {reference}"[:90]
+            logger.info(f"Title forced unique with verse reference: {title!r} "
+                        f"(was: {problem})")
 
         self._remember_title(title)
         return title
 
     async def generate_title(self, story_text: str,
-                             avoid_titles: Optional[list] = None) -> str:
-        """Generate a punchy, sub-60-char, keyword-first YouTube Shorts title
-        from the niche's title prompt template."""
+                             avoid_titles: Optional[list] = None,
+                             reference: str = "") -> str:
+        """Generate a YouTube Shorts title from the niche's title prompt.
+
+        Niches with title_patterns rotate the title's STRUCTURE per video
+        (question / verse-anchored / promise / ...), picked by
+        weighted_variant so real view counts bias which shapes get used.
+        The chosen pattern is stashed on self._last_title_pattern so
+        generate() can record it with the video's variants.
+        """
         if not NICHE.title_prompt:
             return ""
-        avoid_block = (("Do NOT reuse any of these recent titles (make something clearly "
-                        "different): " + "; ".join(avoid_titles) + "\n")
+        avoid_block = (("Do NOT reuse any of these recent titles — and differ "
+                        "in STRUCTURE from all of them, not just word choice: "
+                        + "; ".join(avoid_titles) + "\n")
                        if avoid_titles else "")
         # {steer}: a rotating sample of the niche's steer feelings, so titles
         # don't cluster on one emotion. Only filled when the niche defines it.
@@ -577,14 +632,23 @@ class ScriptGenerator:
         if NICHE.title_steer_feelings:
             picks = random.sample(list(NICHE.title_steer_feelings), 4)
             steer = ", ".join(f"'{f}'" for f in picks)
+        # Structural pattern rotation (performance-weighted).
+        pattern_block = ""
+        if NICHE.title_patterns:
+            name = weighted_variant("title_pattern", list(NICHE.title_patterns))
+            self._last_title_pattern = name
+            pattern_block = NICHE.title_patterns[name].format(
+                reference=reference or "the verse reference")
         prompt = NICHE.title_prompt.format(
-            steer=steer, avoid_block=avoid_block, story=(story_text or "")[:800])
+            steer=steer, avoid_block=avoid_block, pattern_block=pattern_block,
+            story=(story_text or "")[:800])
+        cap = 90 if NICHE.title_patterns else 60  # room for verse refs; <=100 with #Shorts
         try:
             out = await self._call_ai(prompt)
             if out:
                 t = out.strip().splitlines()[0].strip().strip('"').strip().rstrip(".")
                 if t:
-                    return t[:60]
+                    return t[:cap]
         except Exception:
             pass
         return ""

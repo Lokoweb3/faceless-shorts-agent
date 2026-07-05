@@ -171,6 +171,11 @@ class Niche:
     news_title_suffix: str = ""    # appended in the news-mode title builder
     enforce_title_freshness: bool = False
     title_steer_feelings: Tuple[str, ...] = ()   # sampled into {steer}
+    # Structural title patterns: name -> instruction inserted as {pattern_block}
+    # in title_prompt. One is picked per video by script.weighted_variant()
+    # (performance-biased, recorded as the "title_pattern" variant) so titles
+    # vary in SHAPE, not just word choice. Instruction may use {reference}.
+    title_patterns: dict = field(default_factory=dict)
     # mechanical title fallback ("<Lead> For When You Feel <Feeling>"):
     mech_title_leads: Tuple[str, ...] = ()
     mech_title_feelings: Tuple[str, ...] = ()
@@ -501,17 +506,40 @@ Write the complete devotional with clear section markers like [HOOK], [VERSE], [
             "- No numbering, no commentary — just the lines."),
         title_prompt=(
             "Write ONE warm, uplifting YouTube Shorts title for this Bible devotional.\n"
-            "BEST-PERFORMING FORMULA (strongly prefer this): name a feeling/emotion, then "
-            "'For When You...' plus a BROAD, universal struggle.\n"
-            "Proven structure: 'Peace For When You Are Tired Of Waiting', "
-            "'Strength For When You Feel Like Giving Up', 'Comfort For When You Feel Alone'.\n"
-            "For THIS title, lean toward one of these feelings if it fits the verse: {steer}.\n"
-            "IMPORTANT: do NOT use the word 'overwhelmed' — it has been overused. "
-            "Choose a DIFFERENT, fresh feeling from the kind listed above.\n"
+            "USE THIS STRUCTURE for this title:\n{pattern_block}\n"
+            "If a feeling fits the verse, lean toward one of: {steer}.\n"
+            "IMPORTANT: do NOT use the word 'overwhelmed' — it has been overused.\n"
             "{avoid_block}"
-            "Rules: under 52 characters, warm and relatable not preachy, Title Case, "
-            "NO hashtags, NO quotes, NO emojis, NO Bible reference in the title. Output only the title.\n\n"
+            "Rules: under 70 characters, warm and relatable not preachy, Title Case, "
+            "NO hashtags, NO quotes, NO emojis, faithful to the verse — no promises "
+            "the devotional doesn't deliver. Output only the title.\n\n"
             "DEVOTIONAL:\n{story}"),
+        title_patterns={
+            "formula": (
+                "Emotion formula: '<Emotion> For When You <Feel/Are> <Struggle>'. "
+                "Example: 'Strength For When You Feel Like Giving Up'. "
+                "NO Bible reference in the title."),
+            "question": (
+                "Question form: open with the feeling as a short question, then the "
+                "reassurance. Example: 'Feeling Unseen? God Sees You'. "
+                "NO Bible reference in the title."),
+            "verse_anchored": (
+                "Verse-anchored: a short, striking phrase drawn from the verse's own "
+                "words, then an em dash and the reference '{reference}'. "
+                "Example: 'Joy Comes In The Morning — Psalms 30:5'."),
+            "promise": (
+                "Promise form: name God's promise for a specific kind of person. "
+                "Example: 'God's Promise For Weary Caregivers'. "
+                "NO Bible reference in the title."),
+            "direct": (
+                "Direct address: speak straight to the viewer as 'You...'. "
+                "Example: 'You Were Never Carrying This Alone'. "
+                "NO Bible reference in the title."),
+            "time_based": (
+                "Time-based: tie it to this exact moment in the viewer's day. "
+                "Example: 'Read This Before You Give Up Today'. "
+                "NO Bible reference in the title."),
+        },
         rotations={"hook_style": BIBLE_HOOK_STYLES, "closing": BIBLE_CLOSINGS},
         uses_seo_title=True,
         uses_story_memory=True,
