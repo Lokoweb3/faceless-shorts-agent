@@ -406,33 +406,53 @@ class YouTubeUploader:
     async def update_video(self, video_id: str, title: Optional[str] = None,
                             description: Optional[str] = None,
                             tags: Optional[List[str]] = None) -> bool:
-        """Update video metadata."""
+        """Update video metadata.
+
+        videos.update REQUIRES a complete snippet (title + categoryId at
+        minimum) — sending only the changed fields returns 400. So: fetch
+        the current snippet, merge the changes, send the whole thing back.
+        """
         token = await self.oauth.get_access_token()
         if not token:
             return False
 
-        body = {"id": video_id, "snippet": {}}
-        if title:
-            body["snippet"]["title"] = title[:100]
-        if description:
-            body["snippet"]["description"] = description[:5000]
-        if tags:
-            body["snippet"]["tags"] = tags[:500]
-
         try:
             async with aiohttp.ClientSession() as session:
-                url = f"{self.API_URL}/videos?part=snippet"
                 headers = {
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
                 }
-                async with session.put(url, json=body, headers=headers) as resp:
+                async with session.get(
+                    f"{self.API_URL}/videos",
+                    params={"part": "snippet", "id": video_id},
+                    headers=headers,
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Update failed: could not fetch snippet "
+                                     f"({resp.status})")
+                        return False
+                    items = (await resp.json()).get("items", [])
+                if not items:
+                    logger.error(f"Update failed: video {video_id} not found")
+                    return False
+                snippet = items[0]["snippet"]
+
+                if title:
+                    snippet["title"] = title[:100]
+                if description:
+                    snippet["description"] = description[:5000]
+                if tags:
+                    snippet["tags"] = tags[:500]
+
+                body = {"id": video_id, "snippet": snippet}
+                async with session.put(f"{self.API_URL}/videos?part=snippet",
+                                       json=body, headers=headers) as resp:
                     if resp.status == 200:
                         logger.info(f"Video {video_id} updated")
                         return True
-                    else:
-                        logger.error(f"Update failed: {resp.status}")
-                        return False
+                    logger.error(f"Update failed: {resp.status} - "
+                                 f"{(await resp.text())[:200]}")
+                    return False
         except Exception as e:
             logger.error(f"Update error: {e}")
             return False
