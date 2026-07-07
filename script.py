@@ -24,37 +24,58 @@ from storage import atomic_write_json, load_json
 
 # ── Analytics feedback loop: performance-weighted variant selection ──────────
 # The nightly stats job (publisher.refresh_video_stats) aggregates real view
-# counts per variant into state/variant_stats.json. Rotation points below use
-# weighted_variant() instead of random.choice(): 20% of the time it still
-# explores uniformly (so no variant ever starves), otherwise it samples
-# proportionally to average views, with unproven variants (<2 measured
-# videos) weighted at the global average so new options get a fair shot.
+# counts per variant into state/variant_stats.json. Rotation points use
+# weighted_variant() instead of random.choice().
+#
+# Scheme (channel-owner directive, 2026-07-07):
+# - Each variant keeps its PRIOR share (e.g. the proven bible title formula
+#   holds 70%) until it has _MIN_VIDEOS_TO_TRUST measured videos — no
+#   performance biasing on thin data.
+# - Once variants are proven, they split their combined prior mass in
+#   proportion to real avg views ("challengers earn share with data");
+#   unproven variants keep exactly their prior share.
+# - _EXPLORE_RATE of picks sample straight from the priors, so no variant
+#   ever starves out of the data entirely.
 
 VARIANT_STATS_FILE = STATE_DIR / "variant_stats.json"
 _EXPLORE_RATE = 0.2
-_MIN_VIDEOS_TO_TRUST = 2
+_MIN_VIDEOS_TO_TRUST = 8
 
 
-def weighted_variant(kind: str, options: list) -> str:
-    """Pick a rotation variant, biased toward what has actually performed."""
+def weighted_variant(kind: str, options: list,
+                     priors: Optional[dict] = None) -> str:
+    """Pick a rotation variant: prior-weighted until proven, then the proven
+    group's prior mass is re-split by real performance."""
+    if not options:
+        raise ValueError("weighted_variant needs at least one option")
+    total_p = sum((priors or {}).get(o, 1.0) for o in options)
+    prior_frac = {o: (priors or {}).get(o, 1.0) / total_p for o in options}
+
     try:
         stats = load_json(VARIANT_STATS_FILE, {}).get("variants", {}).get(kind, {})
     except Exception:
         stats = {}
-    if not stats or random.random() < _EXPLORE_RATE:
-        return random.choice(options)
-    proven = [v["avg_views"] for v in stats.values()
-              if v.get("videos", 0) >= _MIN_VIDEOS_TO_TRUST]
-    if not proven:
-        return random.choice(options)
-    prior = max(sum(proven) / len(proven), 1.0)   # fair weight for the unproven
+    proven = {o: stats[o] for o in options
+              if stats.get(o, {}).get("videos", 0) >= _MIN_VIDEOS_TO_TRUST}
+
+    # No proven data yet, or an exploration pick: follow the priors exactly.
+    if not proven or random.random() < _EXPLORE_RATE:
+        return random.choices(options,
+                              weights=[prior_frac[o] for o in options], k=1)[0]
+
+    # Proven variants re-split their combined prior mass by avg views
+    # (floored so a proven dud is rare, never extinct); unproven variants
+    # keep exactly their prior share.
+    proven_mass = sum(prior_frac[o] for o in proven)
+    views = {o: max(float(s.get("avg_views", 0.0)), 1.0) for o, s in proven.items()}
+    views_sum = sum(views.values())
     weights = []
-    for opt in options:
-        s = stats.get(opt)
-        if s and s.get("videos", 0) >= _MIN_VIDEOS_TO_TRUST:
-            weights.append(max(float(s.get("avg_views", 0.0)), prior * 0.05))
+    for o in options:
+        if o in proven:
+            share = proven_mass * (views[o] / views_sum)
+            weights.append(max(share, proven_mass * 0.03 / max(len(proven), 1)))
         else:
-            weights.append(prior)
+            weights.append(prior_frac[o])
     return random.choices(options, weights=weights, k=1)[0]
 
 
@@ -384,15 +405,24 @@ class ScriptGenerator:
         """
         reference = getattr(content_item, "title", "")
         verse_text = getattr(content_item, "description", "")
-        dur = config.video.target_duration_seconds
+        dur = NICHE.spoken_duration_seconds or config.video.target_duration_seconds
         word_count = int(round(dur / 60 * 145))
         published = self._load_title_history()[-15:]
         published_block = ("\n".join(f"- {t}" for t in published)
                            or "- (none published yet)")
+        # Structural title pattern for THIS video (prior-weighted: the proven
+        # formula holds ~70% until challengers earn share with real views).
+        pattern_rule = ""
+        if NICHE.title_patterns:
+            name = weighted_variant("title_pattern", list(NICHE.title_patterns),
+                                    priors=NICHE.rotation_priors.get("title_pattern"))
+            self._last_title_pattern = name
+            pattern_rule = NICHE.title_patterns[name].format(reference=reference)
         prompt = NICHE.script_prompt.format(
             verse_reference=reference, verse_text=verse_text,
             target_duration=dur, word_count=word_count,
-            published_titles=published_block)
+            published_titles=published_block,
+            title_pattern_rule=pattern_rule or "any emotionally specific shape")
 
         # Hook steering up front, as in the marker path.
         recent_hooks = self._load_hook_history() if NICHE.uses_story_memory else []
@@ -486,7 +516,8 @@ class ScriptGenerator:
 
         # Title: JSON title is the first candidate; the code-level freshness
         # machinery (dup/fuzzy/cooldowns, retries, verse-ref forcing) decides.
-        self._last_title_pattern = ""
+        # (_last_title_pattern was set at prompt build; a freshness retry via
+        # generate_title may overwrite it with the retry's pattern.)
         title = (data.get("title") or "").strip()[:90]
         if title and NICHE.enforce_title_freshness:
             title = await self._ensure_fresh_title(title, script_text,
@@ -799,7 +830,8 @@ class ScriptGenerator:
         # Structural pattern rotation (performance-weighted).
         pattern_block = ""
         if NICHE.title_patterns:
-            name = weighted_variant("title_pattern", list(NICHE.title_patterns))
+            name = weighted_variant("title_pattern", list(NICHE.title_patterns),
+                                    priors=NICHE.rotation_priors.get("title_pattern"))
             self._last_title_pattern = name
             pattern_block = NICHE.title_patterns[name].format(
                 reference=reference or "the verse reference")
@@ -872,7 +904,8 @@ class ScriptGenerator:
 
         # Fill the niche's rotation slots (hook_style/closing/ending_style/...)
         # with performance-weighted picks; record them for the analytics loop.
-        chosen = {kind: weighted_variant(kind, list(options))
+        chosen = {kind: weighted_variant(kind, list(options),
+                                         priors=NICHE.rotation_priors.get(kind))
                   for kind, options in NICHE.rotations.items()}
         self._last_variants = dict(chosen)
 

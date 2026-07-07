@@ -194,6 +194,16 @@ class Niche:
     # order matters (it fixes the random-draw order).
     rotations: dict = field(default_factory=dict)
 
+    # Prior weights for rotation slots: kind -> {option: weight}. Until a
+    # variant has _MIN_VIDEOS_TO_TRUST measured videos, picks follow these
+    # priors (no performance biasing); proven variants then split their
+    # prior mass by real avg views. Unlisted kinds/options default uniform.
+    rotation_priors: dict = field(default_factory=dict)
+
+    # Spoken duration for JSON-prompt niches (seconds). 0 = use
+    # config.video.target_duration_seconds.
+    spoken_duration_seconds: int = 0
+
     # ── Behavior flags ──
     allow_template_fallback: bool = False  # news only: canned script when AI down
     uses_story_memory: bool = False        # dedup/similarity ledger + premise rotation
@@ -518,13 +528,10 @@ generic "peace." Specific beats general: "the friend who stopped calling" beats
 "loneliness."
 
 TITLE RULES
-- Must NOT match the pattern "[Noun] For When You Feel [Emotion]" — that template
-  is retired.
+- STRUCTURE for this title: {title_pattern_rule}
 - Must not resemble any title in the published list above (same emotion + same
   promise = duplicate, even with different words).
 - Under 60 characters, emotionally specific, curiosity or recognition driven.
-  Good shapes: a direct promise ("Let God Fight Your Battles"), a named moment
-  ("For the Night You Can't Stop Crying"), a gentle question, a bold claim.
 - End with #Shorts.
 
 SCENE PROMPTS
@@ -573,6 +580,10 @@ If any check fails, silently fix and re-verify before outputting.""",
             "the devotional doesn't deliver. Output only the title.\n\n"
             "DEVOTIONAL:\n{story}"),
         title_patterns={
+            "formula": (
+                "Emotion formula: '<Emotion> For When You <Feel/Are> <Struggle>'. "
+                "Example: 'Strength For When You Feel Like Giving Up'. "
+                "NO Bible reference in the title."),
             "question": (
                 "Question form: open with the feeling as a short question, then the "
                 "reassurance. Example: 'Feeling Unseen? God Sees You'. "
@@ -594,6 +605,10 @@ If any check fails, silently fix and re-verify before outputting.""",
                 "Example: 'Read This Before You Give Up Today'. "
                 "NO Bible reference in the title."),
         },
+        rotation_priors={"title_pattern": {
+            "formula": 0.70, "question": 0.06, "verse_anchored": 0.06,
+            "promise": 0.06, "direct": 0.06, "time_based": 0.06}},
+        spoken_duration_seconds=80,   # ~193 words at 145wpm — the proven 180-210 range
         uses_seo_title=True,
         uses_story_memory=True,
         enforce_title_freshness=True,
